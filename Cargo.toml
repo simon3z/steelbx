@@ -1,0 +1,26 @@
+[package]
+name = "steelbx"
+version = "0.1.0"
+edition = "2021"
+description = "Run unsupervised workloads in isolated podman containers with security profiles"
+license = "Apache-2.0"
+repository = "https://github.com/simon3z/steelbx"
+homepage = "https://github.com/simon3z/steelbx"
+rust-version = "1.85"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+clap_complete = { version = "4", features = ["unstable-dynamic"] }
+indexmap = { version = "2", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = { version = "1", features = ["preserve_order"] }
+
+[lints.clippy]
+cognitive_complexity = "warn"
+too_many_lines = "warn"
+too_many_arguments = "warn"
+
+[dev-dependencies]
+tempfile = "3"
