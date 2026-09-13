@@ -1,0 +1,12 @@
+# Project-wide clippy quality gates.
+#
+# cognitive-complexity: parity with (and stricter than) the old arborist gate
+# (arborist flagged functions at cognitive complexity 20; clippy scores this
+# crate's max at 11, so 9 catches everything arborist caught).
+cognitive-complexity-threshold = 9
+
+# Function length: arborist had no line-based check, so this surpasses it.
+too-many-lines-threshold = 35
+
+# Argument fan-out: also not checked by arborist.
+too-many-arguments-threshold = 5
