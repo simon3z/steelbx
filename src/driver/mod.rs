@@ -253,6 +253,11 @@ impl Podman {
         let args = Self::create_args(box_name, spec);
         let res = self.run(&args);
         if let Err(e) = res {
+            let msg = format!("{e}");
+            // Name collision: nothing was created, no rollback needed.
+            if msg.contains("already in use") {
+                bail!("box '{box_name}' already exists\nRemove it first: steelbx rm {box_name}");
+            }
             // Roll back only a half-built container that exists: a
             // rejected create (a bad flag) often leaves nothing, and
             // rm-ing a nonexistent name is noise, not cleanup.
@@ -318,12 +323,6 @@ impl Podman {
     /// SIGTERM grace was a live-measured 10.4s) then rm. Plain:
     /// rm; a failed graceful rm is retried once with force (wedged box).
     pub fn remove_container(&self, name: &str, force: bool) -> Result<()> {
-        let running = self
-            .inspect(name)?
-            .is_some_and(|i| i.state.as_deref() == Some("running"));
-        if !force && running {
-            bail!("box '{name}' is running\nForce-remove it: steelbx rm --force {name}");
-        }
         if force {
             let _ = self.run(&["kill".into(), name.into()]);
         }
@@ -331,6 +330,10 @@ impl Podman {
         match self.run(&["rm".into(), name.into()]) {
             Ok(_) => Ok(()),
             Err(e) => {
+                let msg = format!("{e}");
+                if !force && msg.contains("running") {
+                    bail!("box '{name}' is running\nForce-remove it: steelbx rm --force {name}");
+                }
                 eprintln!("warning: 'podman rm {name}' failed ({e}) — retrying with force");
                 match self.run(&["rm".into(), "-f".into(), name.into()]) {
                     Ok(_) => Ok(()),
@@ -391,9 +394,8 @@ impl Podman {
         let info = self
             .inspect(name)?
             .ok_or_else(|| anyhow!("box '{name}' does not exist"))?;
-        if info.state.as_deref() != Some("running") {
-            self.run(&["start".into(), name.into()])?;
-        }
+        // Start is a no-op on a running container — no state check needed.
+        self.run(&["start".into(), name.into()])?;
         Ok(info)
     }
 

@@ -153,13 +153,6 @@ fn cmd_create(
     let (workdir, mounts) = create_layout(&cfg, &meta, paths)?;
     let box_name = box_name_from(box_name, image, &meta)?;
 
-    // Refuse if this box exists — create never modifies.
-    if let Some(existing) = pod.inspect(&box_name)? {
-        anyhow::bail!(
-            "box '{box_name}' already exists (state: {})\nRemove it first: steelbx rm {box_name}",
-            existing.state.as_deref().unwrap_or("?")
-        );
-    }
     let spec = CreateSpec {
         image: image.to_string(),
         workdir,
