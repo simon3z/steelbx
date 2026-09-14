@@ -56,6 +56,26 @@ enough to trust.
 | A2 | The workload's network egress is a **capability surface**, and what it can reach is a **design variable** — not an accident. |
 | A3 | We accept **image supply-chain risk** as out of scope for v0. The workload is expected to be able to `sudo` inside the box anyway (containers are not security boundaries against the workload). |
 
+## When steelbx is the right tool
+
+Steelbx is a thin layer over podman: it does not enforce anything itself —
+it compiles a reviewed profile into a pinned podman command and lets the
+container runtime do the containing. It is the right choice when:
+
+- you run **your own** unsupervised workloads on **your own** machine (or
+  one remote podman host), in short, frequent, parallel runs
+- boot time (50–200 ms) and footprint matter more than kernel-level
+  enforcement
+- you want the entire security surface to be auditable — no daemon, no
+  state, no moving parts
+- runtime env (bare `-e NAME`) is enough for your credential handling
+
+It is **not** the right choice when the workload is genuinely adversarial
+or you need in-box enforcement — per-destination/per-binary egress policy,
+Landlock/seccomp, or credentials kept out of the process env. Recall threat
+model A3: the workload can `sudo` inside the box. For that class of
+workload, use a heavier runtime (e.g. NVIDIA's OpenShell) or a VM.
+
 ## How it works
 
 **There is no per-box configuration to author:** the profile's `image`
