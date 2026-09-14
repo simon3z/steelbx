@@ -66,11 +66,11 @@ enum Cmd {
         #[arg(short = 'e', long = "env")]
         env: Vec<String>,
     },
-    /// Remove a box; fails if running — --force force-deletes
+    /// Remove boxes; fails if running — --force force-deletes
     Rm {
-        /// Box name
+        /// Box names
         #[arg(add = ArgValueCompleter::new(box_name_candidates))]
-        box_name: String,
+        box_names: Vec<String>,
         #[arg(long, short = 'f')]
         force: bool,
     },
@@ -124,7 +124,7 @@ fn main() -> anyhow::Result<()> {
             paths,
         ),
         Cmd::Enter { box_name, env } => cmd_enter(box_name, env),
-        Cmd::Rm { box_name, force } => cmd_rm(box_name, *force),
+        Cmd::Rm { box_names, force } => cmd_rm(box_names, *force),
         Cmd::Ps => cmd_ps(),
         Cmd::Exec { box_name, env, cmd } => cmd_exec(box_name, env, cmd),
         Cmd::Completion { shell } => cmd_completion(*shell),
@@ -384,12 +384,14 @@ fn validate_cli_env(env: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_rm(box_name: &str, force: bool) -> anyhow::Result<()> {
+fn cmd_rm(box_names: &[String], force: bool) -> anyhow::Result<()> {
     let pod = Podman::detect()?;
     driver::warn_rootful();
-    resolve_box(&pod, box_name)?;
-    // The enforcement lives in the driver: plain rm refuses a running box.
-    pod.remove_container(box_name, force)?;
+    for name in box_names {
+        resolve_box(&pod, name)?;
+        // The enforcement lives in the driver: plain rm refuses a running box.
+        pod.remove_container(name, force)?;
+    }
     // Silent on success.
     Ok(())
 }
