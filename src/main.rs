@@ -37,7 +37,7 @@ enum Cmd {
         /// (shipped; a user profile of the same name overrides).
         /// Defaults to `default`.
         /// Completes from the profiles dirs.
-        #[arg(add = ArgValueCompleter::new(profile_candidates))]
+        #[arg(short = 'p', long = "profile", add = ArgValueCompleter::new(profile_candidates))]
         profile: Option<String>,
         /// Image override for the profile's `image` key (must be local:
         /// steelbx consumes images, it does not pull them). Completes
@@ -883,9 +883,9 @@ mod tests {
         }
         let out = std::process::Command::new(binary())
             .env("COMPLETE", "bash")
-            .env("_CLAP_COMPLETE_INDEX", "2")
+            .env("_CLAP_COMPLETE_INDEX", "3")
             .env("HOME", t.path())
-            .args(["--", "steelbx", "create", ""])
+            .args(["--", "steelbx", "create", "-p", ""])
             .output()
             .expect("running the binary");
         let out = String::from_utf8_lossy(&out.stdout).to_string();

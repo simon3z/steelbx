@@ -83,12 +83,12 @@ names the box's layout image (the image's `WORKDIR`), and the mounts you
 pass on the CLI (plus the profile's `mounts` key) are all the box has.
 
 ```console
-$ steelbx create default -i localhost/my-workload:latest ~/project
+$ steelbx create -p default -i localhost/my-workload:latest ~/project
 Created box: my-workload-1a2b3c4d
 Enter with: steelbx enter my-workload-1a2b3c4d
 ```
 
-- `create [profile] [-i <image>] [-n <box-name>] <paths...>` — the
+- `create [-p <profile>] [-i <image>] [-n <box-name>] <paths...>` — the
   profile (default: `default`) selects the policy; the image comes
   from the profile's `image` key (overridable with `-i`) and must be
   local (steelbx consumes images, it does not pull them); the box
@@ -229,10 +229,10 @@ the schema reference), `examples/pi-agent.conf` (a toolbox-style box
 with GUI access and session env passthrough), and
 `examples/toolbox.conf` (the full toolbox flag set; adjust the mounts
 for your host). Each carries its `image` key —
-`create <profile>` is self-contained; `-i <image>` overrides it for
+`create -p <profile>` is self-contained; `-i <image>` overrides it for
 one create.
 
-`steelbx create [profile]` selects `profiles/<name>.conf` (default:
+`steelbx create -p <profile>` selects `profiles/<name>.conf` (default:
 `default`) — a **complete** `containers.conf` with **no merging**
 (replace semantics). Profiles resolve in
 `~/.config/steelbx/profiles/` first, then in the shipped location
@@ -271,7 +271,7 @@ are rejected by validation, before anything runs.
 
 | Command | Behavior |
 |---|---|
-| `steelbx create [profile] [-i <image>] [-n <box-name>] <paths...>` | Create the box (created state; starts on first `enter`). Profile defaults to `default`. Without `-n`, a unique name is generated (base + 8 hex). Tab-completion suggests profiles, marker-labeled images for `-i`, existing box names for `-n`, and directories for the paths |
+| `steelbx create [-p <profile>] [-i <image>] [-n <box-name>] <paths...>` | Create the box (created state; starts on first `enter`). Profile defaults to `default`. Without `-n`, a unique name is generated (base + 8 hex). Tab-completion suggests profiles, marker-labeled images for `-i`, existing box names for `-n`, and directories for the paths |
 | `steelbx run [-p <profile>] [-i <image>] [-n <name>] [-e NAME] <paths...>` | Disposable box: create → enter → auto-rm, like `podman run --rm`. The profile is a flag (`-p`) so every positional is a mount dir; the name is `-n` or a generated unique name; the box is force-removed on exit and the exit code is the session's (130 if interrupted). TTY required |
 | `steelbx enter <box-name> [-e NAME]` | Start if needed, interactive shell (TTY required); `-e NAME` exposes a caller env var for the session (the box's declared runtime env is always injected) |
 | `steelbx exec <box-name> [-e NAME] cmd...` | One-shot command; `-e NAME` as above |
