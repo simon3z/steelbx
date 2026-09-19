@@ -40,9 +40,11 @@ pub(crate) fn cmd_label_from_image_inspect(v: &serde_json::Value) -> bool {
         .is_some()
 }
 
-/// The declared default box name: the image's own optional label
+/// The declared base name: the image's own optional label
 /// `com.github.simon3z.steelbx.box.name` (toolbox-style: the distribution unit
-/// carries its identity). Absent or empty ⇒ no declaration.
+/// carries its identity). `create` uses it as the prefix of the generated
+/// box name when `-n` is absent. Absent or empty ⇒ no declaration (the
+/// image's name component is the base instead).
 pub(crate) fn name_label_from_image_inspect(v: &serde_json::Value) -> Option<String> {
     v.get(0)
         .and_then(|c| c.get("Config"))

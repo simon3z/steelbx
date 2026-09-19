@@ -1,4 +1,5 @@
 use std::io::IsTerminal;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Context;
 
@@ -50,6 +51,30 @@ enum Cmd {
         /// for another. Completes from the live boxes.
         #[arg(short = 'n', long = "name", add = ArgValueCompleter::new(box_name_candidates))]
         box_name: Option<String>,
+        /// Host paths, mounted at <WORKDIR>/<basename>
+        #[arg(value_hint = ValueHint::DirPath)]
+        paths: Vec<String>,
+    },
+    /// Disposable box: create → enter → auto-rm (like `podman run
+    /// --rm`). The profile is a FLAG (not positional) so every
+    /// positional is a mount dir — no profile/path ambiguity.
+    Run {
+        /// Policy profile. Defaults to `default`. Completes from the
+        /// profiles dirs.
+        #[arg(short = 'p', long = "profile", add = ArgValueCompleter::new(profile_candidates))]
+        profile: Option<String>,
+        /// Image override (must be local). Completes from marked local
+        /// images.
+        #[arg(short = 'i', long = "image", add = ArgValueCompleter::new(image_candidates))]
+        image: Option<String>,
+        /// Box name to pin; absent → a generated unique name.
+        #[arg(short = 'n', long = "name", add = ArgValueCompleter::new(box_name_candidates))]
+        box_name: Option<String>,
+        /// Expose a caller env variable to the session (bare NAME).
+        /// Repeatable. The box's declared runtime env is always
+        /// injected.
+        #[arg(short = 'e', long = "env")]
+        env: Vec<String>,
         /// Host paths, mounted at <WORKDIR>/<basename>
         #[arg(value_hint = ValueHint::DirPath)]
         paths: Vec<String>,
@@ -123,6 +148,19 @@ fn main() -> anyhow::Result<()> {
             box_name.as_deref(),
             paths,
         ),
+        Cmd::Run {
+            profile,
+            image,
+            box_name,
+            env,
+            paths,
+        } => std::process::exit(cmd_run(
+            profile.as_deref().unwrap_or("default"),
+            image.as_deref(),
+            box_name.as_deref(),
+            env,
+            paths,
+        )),
         Cmd::Enter { box_name, env } => cmd_enter(box_name, env),
         Cmd::Rm { box_names, force } => cmd_rm(box_names, *force),
         Cmd::Ps => cmd_ps(),
@@ -141,18 +179,138 @@ fn cmd_create(
     if !is_remote() {
         driver::warn_rootful();
     }
+    let (spec, meta) = prepare_create(&pod, profile, image, paths)?;
+    let created = create_box(&pod, &spec, &meta, box_name)?;
+    println!("Created box: {created}");
+    println!("Enter with: steelbx enter {created}");
+    Ok(())
+}
+
+/// Create the box with a name: `-n` explicit (validated; a taken name
+/// is an error), or a generated unique name (bounded retry on the
+/// ≈impossible collision). Shared by `create` and `run`; returns the
+/// name.
+fn create_box(
+    pod: &Podman,
+    spec: &CreateSpec,
+    meta: &driver::ImageMeta,
+    box_name: Option<&str>,
+) -> anyhow::Result<String> {
+    match box_name {
+        Some(n) => {
+            if !driver::is_valid_name(n) {
+                anyhow::bail!("invalid box name: {n:?} — pass -n <name>");
+            }
+            pod.create(n, spec)?;
+            Ok(n.to_string())
+        }
+        None => create_with_unique_retry(pod, spec, &base_box_name(&spec.image, meta)),
+    }
+}
+
+/// Disposable box: create → enter → auto-rm. Like `podman run --rm`.
+/// Returns the session's exit code (the shell's, or 130 if interrupted).
+fn cmd_run(
+    profile: &str,
+    image: Option<&str>,
+    box_name: Option<&str>,
+    env: &[String],
+    paths: &[String],
+) -> i32 {
+    let pod = match Podman::detect() {
+        Ok(p) => p,
+        Err(e) => return run_fail(e),
+    };
+    if !is_remote() {
+        driver::warn_rootful();
+    }
+    let (spec, meta) = match prepare_create(&pod, profile, image, paths) {
+        Ok(x) => x,
+        Err(e) => return run_fail(e),
+    };
+    let name = match create_box(&pod, &spec, &meta, box_name) {
+        Ok(n) => n,
+        Err(e) => return run_fail(e),
+    };
+    run_session(&pod, &name, &spec, env, profile)
+}
+
+/// Map a `run` failure to exit 1 (the error is already descriptive).
+fn run_fail(e: anyhow::Error) -> i32 {
+    eprintln!("steelbx: {e}");
+    1
+}
+
+/// The interactive session of `run`: trap signals, enter, always
+/// force-remove, and return the session's exit code (130 if interrupted).
+fn run_session(pod: &Podman, name: &str, spec: &CreateSpec, env: &[String], profile: &str) -> i32 {
+    // Install the SIGINT/SIGTERM trap before the interactive session: a
+    // Ctrl-C then interrupts the session (the child gets the signal)
+    // without killing steelbx and leaking the box.
+    install_signal_trap();
+    // The runtime env names are exactly what create labeled on the
+    // container (`box.env` = `spec.runtime_env`); no re-inspect needed.
+    let (inject, unset) =
+        runtime_env_injection(&spec.runtime_env, env, |n| std::env::var(n).is_ok());
+    note_unset_env(name, &unset);
+    // Readable window title: the profile, not the random generated name.
+    set_window_title(profile);
+    let code = match pod.enter_status(name, &inject) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("steelbx: {e}");
+            1
+        }
+    };
+    // Always force-remove: works whether the session is running or in the
+    // created state (kill is best-effort/ignored).
+    let _ = pod.remove_container(name, true);
+    if INTERRUPTED.load(Ordering::SeqCst) {
+        130
+    } else {
+        code
+    }
+}
+
+/// Survives SIGINT/SIGTERM: installing any handler overrides the default
+/// terminate action, so a Ctrl-C interrupts the session (the child gets
+/// its own copy of the signal) without killing steelbx and leaking the
+/// box.
+extern "C" fn on_interrupt(_sig: libc::c_int) {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+/// Install handlers for SIGINT and SIGTERM around the interactive
+/// session, so Ctrl-C / `kill` clean the box up instead of leaking it.
+fn install_signal_trap() {
+    unsafe {
+        let _ = libc::signal(libc::SIGINT, on_interrupt as *const () as usize);
+        let _ = libc::signal(libc::SIGTERM, on_interrupt as *const () as usize);
+    }
+}
+
+/// Set by the signal handler when the session is interrupted.
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// The shared create pipeline: load the profile, resolve the image
+/// (the `-i` flag > the profile's `image` key), one image inspect
+/// (layout WORKDIR + declared base name), derive the mount layout, and
+/// build the full spec. The box name is decided by the caller.
+fn prepare_create(
+    pod: &Podman,
+    profile: &str,
+    image: Option<&str>,
+    paths: &[String],
+) -> anyhow::Result<(CreateSpec, driver::ImageMeta)> {
     // Policy: the named profile (profiles/<name>.conf) — a complete
     // `containers.conf` (replace semantics, no merging). Loaded before
     // layout: a profile `workdir` overrides the base.
     let cfg = SteelbxConfig::load_profile(profile)?;
     // Image precedence: the `-i` flag > the profile's `image` key.
     let image = resolve_image(image, &cfg, profile)?;
-    // One image inspect: layout (WORKDIR, overridable) + declared
-    // default name.
+    // One image inspect: layout (WORKDIR, overridable) + declared base name.
     let meta = pod.image_meta(image)?;
     let (workdir, mounts) = create_layout(&cfg, &meta, paths)?;
-    let box_name = box_name_from(box_name, image, &meta)?;
-
     let spec = CreateSpec {
         image: image.to_string(),
         workdir,
@@ -161,10 +319,29 @@ fn cmd_create(
         runtime_env: merge_runtime_env(&cfg.runtime_env, &meta.env),
         ..(&cfg).into()
     };
-    pod.create(&box_name, &spec)?;
-    println!("Created box: {box_name}");
-    println!("Enter with: steelbx enter {box_name}");
-    Ok(())
+    Ok((spec, meta))
+}
+
+/// Create with a generated unique name, regenerating on the (≈impossible)
+/// name collision instead of failing — a bounded retry keeps a unique-name
+/// create self-healing.
+fn create_with_unique_retry(pod: &Podman, spec: &CreateSpec, base: &str) -> anyhow::Result<String> {
+    const MAX_TRIES: usize = 8;
+    let mut tries = 0;
+    loop {
+        let name = driver::unique_name(base);
+        match pod.create(&name, spec) {
+            Ok(()) => return Ok(name),
+            Err(e) => {
+                // The driver's collision error reads "already exists".
+                if tries < MAX_TRIES && format!("{e}").contains("already exists") {
+                    tries += 1;
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
 }
 
 /// The mount layout: the profile's `workdir` override > the image's
@@ -205,21 +382,12 @@ fn resolve_image<'a>(
     }
 }
 
-/// Name precedence: -n flag > the image's declared name label
-/// (`com.github.simon3z.steelbx.box.name`) > the image's name component without tag.
-fn box_name_from(
-    flag: Option<&str>,
-    image: &str,
-    meta: &driver::ImageMeta,
-) -> anyhow::Result<String> {
-    let name = flag
-        .map(String::from)
-        .or_else(|| meta.name.clone())
-        .unwrap_or_else(|| default_box_name(image));
-    if !driver::is_valid_name(&name) {
-        anyhow::bail!("invalid box name: {name:?} — pass -n <name>");
-    }
-    Ok(name)
+/// The default box-name base: the image's declared name label
+/// (`com.github.simon3z.steelbx.box.name`), else the image's name
+/// component without tag. When `-n` is absent, this is the prefix of the
+/// generated unique name (e.g. `pi-steelbx-a1b2c3d4`).
+fn base_box_name(image: &str, meta: &driver::ImageMeta) -> String {
+    meta.name.clone().unwrap_or_else(|| default_box_name(image))
 }
 
 /// The runtime env names written onto the box at create (its
@@ -526,7 +694,7 @@ mod tests {
         let mut buf = Vec::new();
         generate(Shell::Bash, &mut cmd, "steelbx", &mut buf);
         let s = String::from_utf8_lossy(&buf);
-        for verb in ["create", "enter", "exec", "ps", "rm", "completion"] {
+        for verb in ["create", "run", "enter", "exec", "ps", "rm", "completion"] {
             assert!(s.contains(verb), "completion must cover '{verb}'");
         }
     }
@@ -589,6 +757,32 @@ mod tests {
             "fedora"
         );
         assert_eq!(default_box_name("pi-steelbx"), "pi-steelbx");
+    }
+
+    /// The base for a generated name: the image's declared name label
+    /// wins; absent, the image's name component.
+    #[test]
+    fn base_box_name_prefers_label_over_component() {
+        let labeled = driver::ImageMeta {
+            workdir: None,
+            name: Some("declared".into()),
+            cmd: false,
+            env: vec![],
+        };
+        assert_eq!(
+            base_box_name("localhost/pi-steelbx:latest", &labeled),
+            "declared"
+        );
+        let unlabeled = driver::ImageMeta {
+            workdir: None,
+            name: None,
+            cmd: false,
+            env: vec![],
+        };
+        assert_eq!(
+            base_box_name("localhost/pi-steelbx:latest", &unlabeled),
+            "pi-steelbx"
+        );
     }
 
     // The dynamic install (source <(COMPLETE=bash steelbx)) is primary;

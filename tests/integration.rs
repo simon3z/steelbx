@@ -461,6 +461,38 @@ fn g1_create_exec_rm() {
     drop(work);
 }
 
+/// create with a generated unique name (no -n): the name is valid and
+/// distinct across creates, and the box is removable. Skipped when
+/// podman is unavailable.
+#[test]
+fn g_unique_create_name() {
+    if !podman_available() {
+        eprintln!("skipping: podman not available");
+        return;
+    }
+    let pod = steelbx::driver::Podman::detect().unwrap();
+    ensure_base_image_local("registry.fedoraproject.org/fedora:42");
+    let base = "steelbx-it-uniq";
+    let n1 = steelbx::driver::unique_name(base);
+    let n2 = steelbx::driver::unique_name(base);
+    assert_ne!(n1, n2, "two generated names must differ");
+    assert!(steelbx::driver::is_valid_name(&n1));
+    assert!(steelbx::driver::is_valid_name(&n2));
+    // Shape: <base>-<8 hex>.
+    assert!(n1.starts_with(&format!("{base}-")));
+    let token = &n1[base.len() + 1..];
+    assert_eq!(token.len(), 8);
+    assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
+    let spec = steelbx::driver::CreateSpec {
+        image: "registry.fedoraproject.org/fedora:42".to_string(),
+        command: vec!["sleep".to_string(), "infinity".to_string()],
+        ..Default::default()
+    };
+    pod.create(&n1, &spec).unwrap();
+    pod.remove_container(&n1, true).unwrap();
+    assert!(pod.inspect(&n1).unwrap().is_none());
+}
+
 /// ADR-021 acceptance: init commands run as exec -u 0 (root) right
 /// after create — live-measured: a box must be initialized before it
 /// is handed over. Skipped when podman is unavailable.

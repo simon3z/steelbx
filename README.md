@@ -83,20 +83,27 @@ names the box's layout image (the image's `WORKDIR`), and the mounts you
 pass on the CLI (plus the profile's `mounts` key) are all the box has.
 
 ```console
-$ steelbx create -i localhost/my-workload ~/project
-Created box: my-workload
-Enter with: steelbx enter my-workload
+$ steelbx create default -i localhost/my-workload:latest ~/project
+Created box: my-workload-1a2b3c4d
+Enter with: steelbx enter my-workload-1a2b3c4d
 ```
 
 - `create [profile] [-i <image>] [-n <box-name>] <paths...>` — the
   profile (default: `default`) selects the policy; the image comes
   from the profile's `image` key (overridable with `-i`) and must be
   local (steelbx consumes images, it does not pull them); the box
-  name is `-n`, else the image's declared name label
-  (`com.github.simon3z.steelbx.box.name`), else the image's name
-  component without tag; each `<path>` is bind-mounted at
+  name is `-n` when given, otherwise a generated unique name built on
+  the image's declared base (its `com.github.simon3z.steelbx.box.name`
+  label, else the image's name component without tag), e.g.
+  `pi-steelbx-a1b2c3d4`; each `<path>` is bind-mounted at
   `<WORKDIR>/<basename>`; the box is left in `created` state and
   started on its first `enter`
+
+- `run [-p <profile>] [-i <image>] [-n <name>] [-e NAME] <paths...>` —
+  a disposable box: creates the box (a generated unique name unless
+  `-n`), enters it, and force-removes it on the way out — like
+  `podman run --rm`. The profile is a flag (`-p`), so every positional
+  is a mount dir; the exit code is the session's (130 if interrupted)
 
 - `enter` / `exec` take the box name and, optionally, `-e NAME`
   runtime env names
@@ -264,7 +271,8 @@ are rejected by validation, before anything runs.
 
 | Command | Behavior |
 |---|---|
-| `steelbx create [profile] [-i <image>] [-n <box-name>] <paths...>` | Create the box (created state; starts on first `enter`). Profile defaults to `default`. Tab-completion suggests profiles, marker-labeled images for `-i`, existing box names for `-n`, and directories for the paths |
+| `steelbx create [profile] [-i <image>] [-n <box-name>] <paths...>` | Create the box (created state; starts on first `enter`). Profile defaults to `default`. Without `-n`, a unique name is generated (base + 8 hex). Tab-completion suggests profiles, marker-labeled images for `-i`, existing box names for `-n`, and directories for the paths |
+| `steelbx run [-p <profile>] [-i <image>] [-n <name>] [-e NAME] <paths...>` | Disposable box: create → enter → auto-rm, like `podman run --rm`. The profile is a flag (`-p`) so every positional is a mount dir; the name is `-n` or a generated unique name; the box is force-removed on exit and the exit code is the session's (130 if interrupted). TTY required |
 | `steelbx enter <box-name> [-e NAME]` | Start if needed, interactive shell (TTY required); `-e NAME` exposes a caller env var for the session (the box's declared runtime env is always injected) |
 | `steelbx exec <box-name> [-e NAME] cmd...` | One-shot command; `-e NAME` as above |
 | `steelbx rm <box-name>` | Remove; silent on success, `--force` kills running |
@@ -273,9 +281,11 @@ are rejected by validation, before anything runs.
 `--verbose` (`-v`): print each podman command as it runs, on stderr —
 for reading back exactly what steelbx sent podman.
 
-`enter`/`exec` set the terminal window title to `steelbx <box>` (OSC 0
-escape, written when the output is a terminal — never when piped). A
-shell prompt that sets its own title (e.g. Fedora's default `PROMPT_COMMAND`)
+`enter`/`exec` set the terminal window title to `steelbx <box>`; `run`
+sets it to the profile name (the box's own name carries a random unique
+suffix, so the title uses the readable profile). Written as an OSC 0
+escape when the output is a terminal — never when piped. A shell prompt
+that sets its own title (e.g. Fedora's default `PROMPT_COMMAND`)
 overwrites it after the first prompt.
 
 ### Shell completion
@@ -303,10 +313,11 @@ conventionally `true`, never read; the env list is read):
   container, the marker: "this is a steelbx box" (write path —
   steelbx sets it at create; its absence keeps a container out of
   `ps`/`enter`/`rm`).
-- `com.github.simon3z.steelbx.box.name` — on an image, the declared default box name
-  (`create` uses it when `-n` is absent); on a container, a mirror of
-  the name (the distribution unit carries its identity). Never read
-  for layout or policy.
+- `com.github.simon3z.steelbx.box.name` — on an image, the declared base
+  name for a generated box name (`create` uses it as the prefix when
+  `-n` is absent); on a container, a mirror of the name (the
+  distribution unit carries its identity). Never read for layout or
+  policy.
 - `com.github.simon3z.steelbx.box.env` — on an image, the declared runtime env
   names (a comma-separated list — a label is one value; env names
   cannot contain commas); on a container, the box's runtime env (the

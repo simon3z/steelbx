@@ -17,3 +17,8 @@ podman --version
 cargo test --release --test integration -- --test-threads=1
 
 echo "✓ Integration tests passed."
+
+# Manual: `run` is interactive (needs a TTY and a local image), so it is
+# not automated here. Try it by hand against a local steelbx image:
+#   steelbx run -i <local-image> ~/some/path
+# The box auto-removes on exit; the exit code is the shell's (130 on Ctrl-C).

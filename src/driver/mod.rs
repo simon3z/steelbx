@@ -80,10 +80,12 @@ pub const BOX_MARKER: &str = "com.github.simon3z.steelbx.box";
 /// completion only — a toolbox base carries no box layout, so
 /// nothing else reads it.
 pub const TOOLBOX_MARKER: &str = "com.github.containers.toolbox";
-/// The box name label: on an image, the *declared default name* for
-/// `create` (optional); on a container, written by `create`, a
-/// mirror of the container name. The name is NOT a second identity:
-/// box name = container name, always.
+/// The box name label: on an image, the *declared base name* for a
+/// generated `create` name (the prefix of the auto-generated name —
+/// `create` uses it when `-n` is absent; `-n` overrides); on a
+/// container, written by `create`, a mirror of the container name.
+/// The name is NOT a second identity: box name = container name,
+/// always.
 pub const BOX_NAME_LABEL: &str = "com.github.simon3z.steelbx.box.name";
 /// The runtime env label: one value holding a comma-separated list of
 /// env names the box exposes from the caller env at enter/exec (bare
@@ -390,6 +392,28 @@ impl Podman {
         Self::podman_exec("exec", args)
     }
 
+    /// Like `enter`, but returns the session's exit code instead of
+    /// treating a non-zero exit as an error — `run` propagates it after
+    /// cleanup. A signaled child (e.g. Ctrl-C) maps to 130.
+    pub fn enter_status(&self, name: &str, env: &[String]) -> Result<i32> {
+        self.ensure_running(name)?;
+        Self::podman_exec_status("enter", Self::enter_args(name, env))
+    }
+
+    /// `podman exec` with inherited stdio (never time-boxed — it is
+    /// interactive); returns the exit code (non-zero is a value, not an
+    /// error). A signaled child (e.g. Ctrl-C) maps to 130.
+    fn podman_exec_status(label: &str, args: Vec<String>) -> Result<i32> {
+        if VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("podman {}", args.join(" "));
+        }
+        let status = Command::new(Self::binary())
+            .args(args)
+            .status()
+            .context(format!("running 'podman exec' ({label})"))?;
+        Ok(status.code().unwrap_or(130))
+    }
+
     fn ensure_running(&self, name: &str) -> Result<BoxInfo> {
         let info = self
             .inspect(name)?
@@ -464,6 +488,26 @@ pub fn is_valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '-'))
 }
 
+/// A short random hex token (8 hex chars, 32 bits) for generated box
+/// names: no state, no race, compact. The 2^32 space makes a collision
+/// negligible (birthday bound ≈ 65k concurrent names).
+pub fn random_hex_token() -> String {
+    format!("{:08x}", fastrand::u32(0..=u32::MAX))
+}
+
+/// A generated box name: `<base>-<8 hex>`. The base is coerced to a
+/// valid podman name (empty or invalid → `box`), so the result is
+/// always a valid name.
+pub fn unique_name(base: &str) -> String {
+    let base = base.trim_end_matches('-');
+    let base = if base.is_empty() || !is_valid_name(base) {
+        "box"
+    } else {
+        base
+    };
+    format!("{base}-{}", random_hex_token())
+}
+
 /// Rootful podman means an escape means root.
 pub fn warn_rootful() {
     if current_uid() == 0 {
@@ -495,5 +539,35 @@ mod tests {
         assert!(is_valid_name("feature-x"));
         assert!(!is_valid_name("-x"));
         assert!(!is_valid_name("has space"));
+    }
+
+    #[test]
+    fn random_hex_token_is_eight_hex_chars() {
+        let t = random_hex_token();
+        assert_eq!(t.len(), 8);
+        assert!(t.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn unique_name_is_base_plus_valid_hex() {
+        let n = unique_name("pi-steelbx");
+        assert!(n.starts_with("pi-steelbx-"));
+        assert_eq!(n.len(), "pi-steelbx-".len() + 8);
+        assert!(is_valid_name(&n));
+        // Distinct across calls.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..64 {
+            seen.insert(unique_name("pi-steelbx"));
+        }
+        assert_eq!(seen.len(), 64);
+    }
+
+    #[test]
+    fn unique_name_falls_back_to_box_for_bad_base() {
+        for base in ["", "-foo", "has space", "/x"] {
+            let n = unique_name(base);
+            assert!(is_valid_name(&n));
+            assert!(n.starts_with("box-"));
+        }
     }
 }
