@@ -133,8 +133,11 @@ command substitution, ever.
 `${IDENT:-default}` falls back to `default` when the variable is
 unset *or* empty — a profile can declare a sensible default instead
 of failing on machines where the variable is absent. The default is
-literal, up to the first `}` (no re-scan, no nesting: `$$` inside it
-is two characters). The expansion context is layered: `[env]` values
+the text up to the first `}` (no nesting of `${...}` inside it), and
+that text itself expands against the same environment (so
+`${STEELBX_HOME:-$HOME/steelbx-pi}` resolves `$HOME`; an unset
+reference inside it fails loudly, as anywhere else). The expansion
+context is layered: `[env]` values
 expand against the caller env plus `env_files` (they do *not* reference
 each other), and every other value expands against the caller env
 *plus* `env_files` *plus* the `[env]` (profile values win) — so

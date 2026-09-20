@@ -49,11 +49,12 @@ pub fn data_dir(home: &Path) -> PathBuf {
 
 /// Caller-env expansion of a config string value: `$IDENT`,
 /// `${IDENT}` expand against the caller's environment; `${IDENT:-default}`
-/// falls back to `default` when the variable is unset or empty (the
-/// default is literal, up to the first `}` — no re-scan); `$$` is a
-/// literal `$`; any other `$` is an error. Unset references fail loudly
-/// (unless a fallback is given). No shell: the expanded value is never
-/// re-scanned.
+/// falls back to `default` when the variable is unset or empty — the
+/// default is the text up to the first `}` (no nesting of `${...}`
+/// inside it), and that text itself expands against the same
+/// environment; `$$` is a literal `$`; any other `$` is an error.
+/// Unset references fail loudly (unless a fallback is given). No shell:
+/// an expanded *value* is never re-scanned.
 fn expand_env(value: &str, env: &HashMap<String, String>, path: &str) -> Result<String> {
     let mut out = String::new();
     let mut rest = value;
@@ -69,15 +70,14 @@ fn expand_env(value: &str, env: &HashMap<String, String>, path: &str) -> Result<
 
 /// One expansion reference: `$IDENT`, `${IDENT}`, `${IDENT:-default}`
 /// (the fallback: the variable set *and* non-empty wins, else the
-/// default), or `$$`. The default is literal — everything up to the
-/// first `}` (no re-scan, `$$` inside it is two characters, no
-/// nesting). The bare form has no fallback: `$IDENT:-x` is the value
-/// plus the literal `:-x` (still never an error, still never a
-/// shell).
-/// One expansion reference, parsed: the name, an optional literal
-/// fallback, and the rest of the string. `${IDENT}` / `${IDENT:-default}`
-/// take the literal up to the first `}` (no re-scan, `$$` inside it is
-/// two characters, no nesting); the bare form takes the longest
+/// default), or `$$`. The default is the text up to the first `}` (no
+/// nesting of `${...}` inside it); it is not expanded here —
+/// `expand_token` expands it against the caller's environment. The
+/// bare form has no fallback: `$IDENT:-x` is the value plus the
+/// literal `:-x` (still never an error, still never a shell).
+/// One expansion reference, parsed: the name, an optional fallback,
+/// and the rest of the string. `${IDENT}` / `${IDENT:-default}` take
+/// the text up to the first `}`; the bare form takes the longest
 /// `[A-Za-z0-9_]` run.
 fn parse_expansion_ref<'a>(
     after: &'a str,
@@ -124,7 +124,10 @@ fn expand_token<'a>(
         Some(v) if !v.is_empty() => v.clone(),
         Some(_) if default.is_none() => String::new(),
         _ => match default {
-            Some(d) => d,
+            // The default itself expands against the same caller env
+            // (so `${HOMEDIR:-$HOME/box}` resolves `$HOME`); an unset
+            // reference inside it fails loudly, as anywhere else.
+            Some(d) => expand_env(&d, env, &format!("{path} (default)"))?,
             None => return Err(anyhow!("{path}: references unset variable {ident:?}")),
         },
     };
@@ -675,11 +678,35 @@ mod tests {
         assert_eq!(expand_env("${NOFALL:-x}", &env, "t").unwrap(), "x");
         assert_eq!(expand_env("${EMPTY:-x}", &env, "t").unwrap(), "x");
         assert_eq!(expand_env("${FOO:-x}", &env, "t").unwrap(), "bar");
-        // The default is literal, up to the first `}` (no re-scan,
-        // no nesting; `$$` inside it is two characters).
+        // The default is the text up to the first `}` (no nesting
+        // of `${...}` inside it), and that text itself expands:
+        // `$$` inside it is a literal `$`.
+        assert_eq!(expand_env("${NOFALL:-a$$b}c}", &env, "t").unwrap(), "a$bc}");
+    }
+
+    #[test]
+    fn expansion_fallbacks_expand_against_the_caller_env() {
+        let mut env = HashMap::new();
+        env.insert("HOME".to_string(), "/home/user".to_string());
+
+        // Unset variable → the fallback, which itself expands.
         assert_eq!(
-            expand_env("${NOFALL:-a$$b}c}", &env, "t").unwrap(),
-            "a$$bc}"
+            expand_env("${STEELBX_HOME:-$HOME/steelbx-pi}", &env, "t").unwrap(),
+            "/home/user/steelbx-pi"
+        );
+        // Set and non-empty → the value; the fallback is never touched.
+        env.insert("STEELBX_HOME".to_string(), "/box".to_string());
+        assert_eq!(
+            expand_env("${STEELBX_HOME:-$HOME/steelbx-pi}", &env, "t").unwrap(),
+            "/box"
+        );
+        // An unset reference inside the fallback fails loudly.
+        env.remove("STEELBX_HOME");
+        assert!(expand_env("${STEELBX_HOME:-$NOPE}", &env, "t").is_err());
+        // Pure-literal defaults still work (the toolbox idiom).
+        assert_eq!(
+            expand_env("${SHELL:-/bin/bash}", &env, "t").unwrap(),
+            "/bin/bash"
         );
     }
 
