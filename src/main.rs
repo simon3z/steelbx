@@ -124,12 +124,21 @@ enum Cmd {
     },
 }
 
+/// Dynamic completion (clap_complete engine): the sourced shell function
+/// re-invokes this binary (`COMPLETE=<shell> ...`); the request is handled
+/// and the process exits before any parsing. Must run before stdout writes.
+fn init_completion() {
+    CompleteEnv::with_factory(Cli::command)
+        .completer("steelbx")
+        .complete();
+}
+
 fn main() -> anyhow::Result<()> {
     // Dynamic completion (clap_complete engine): the sourced shell
     // function re-invokes this binary (`COMPLETE=<shell> ...`); the
     // request is handled and the process exits before any parsing. It
     // must run before anything writes to stdout.
-    CompleteEnv::with_factory(Cli::command).complete();
+    init_completion();
     // Steelbx-provided env: the standard locations, set if
     // the caller hasn't overridden them — expansion and child
     // processes see the same values.
