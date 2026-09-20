@@ -205,6 +205,10 @@ impl Podman {
             // Podman's _podman_init as PID 1: signal forwarding and
             // zombie reaping without an image dependency.
             "--init".into(),
+            // Pull the image only if not already local (no auto-pull
+            // of arbitrary images; user pre-pulls or this covers the
+            // common case transparently).
+            "--pull=missing".into(),
         ];
         Self::mount_flags(&mut args, spec);
         Self::value_flags(&mut args, spec);

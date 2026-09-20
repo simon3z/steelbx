@@ -171,6 +171,31 @@ impl Podman {
         Ok(out)
     }
 
+    /// A time-boxed run with stderr inherited (shows podman progress
+    /// on the terminal). Used for long-running ops like pull.
+    fn run_passthrough(&self, args: &[String]) -> Result<std::process::Output> {
+        if VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("podman {}", args.join(" "));
+        }
+        let mut cmd = Self::timeout_cmd(args);
+        cmd.stderr(std::process::Stdio::inherit());
+        let out = cmd.output().context("running podman")?;
+        if out.status.code() == Some(124) {
+            bail!(
+                "podman {} timed out after {CALL_TIMEOUT_SECS}s",
+                args.join(" ")
+            );
+        }
+        if !out.status.success() {
+            bail!(
+                "podman {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        Ok(out)
+    }
+
     /// A time-boxed run: any non-zero exit is an error naming stderr.
     fn run(&self, args: &[String]) -> Result<std::process::Output> {
         let out = Self::run_timeboxed(args)?;
@@ -229,13 +254,15 @@ impl Podman {
             Ok(o) => o,
             Err(e) => {
                 let msg = format!("{e}");
-                if msg.contains("no such image") || msg.contains("not found") {
-                    bail!(
-                        "image '{image}' is not local — steelbx consumes images, it \
-                         does not pull them: podman pull {image}"
-                    )
+                if msg.contains("image not known") || msg.contains("not found") {
+                    eprintln!("image '{image}' not local — pulling");
+                    self.run_passthrough(&["pull".to_string(), image.to_string()])
+                        .with_context(|| format!("pulling image '{image}'"))?;
+                    self.run(&args)
+                        .with_context(|| format!("inspecting image '{image}'"))?
+                } else {
+                    return Err(e);
                 }
-                return Err(e);
             }
         };
         let v: serde_json::Value =
