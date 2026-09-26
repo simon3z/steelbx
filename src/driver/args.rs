@@ -202,14 +202,19 @@ impl Podman {
             // answers which box you are in (no second identity).
             "--hostname".into(),
             box_name.into(),
-            // Podman's _podman_init as PID 1: signal forwarding and
-            // zombie reaping without an image dependency.
-            "--init".into(),
             // Pull the image only if not already local (no auto-pull
             // of arbitrary images; user pre-pulls or this covers the
             // common case transparently).
             "--pull=missing".into(),
         ];
+        // Podman's _podman_init as PID 1: signal forwarding and zombie
+        // reaping without an image dependency. Podman only allows it in
+        // a PRIVATE pid namespace, so a shared `pid = "host"` (the
+        // toolbox posture) forbids it — there the declared command is
+        // PID 1 (upstream toolbox behavior).
+        if matches!(spec.pid.as_deref(), None | Some("private")) {
+            args.push("--init".into());
+        }
         Self::mount_flags(&mut args, spec);
         Self::value_flags(&mut args, spec);
         Self::identity_flags(&mut args, spec);
@@ -414,6 +419,9 @@ mod tests {
         }
         assert!(a.contains(&"--privileged".to_string()));
         assert!(a.contains(&"--no-hosts".to_string()));
+        // The toolbox posture (`pid = "host"`) forbids podman's init
+        // binary — PID 1 is the declared command itself.
+        assert!(!a.contains(&"--init".to_string()));
 
         // Absent keys: no flags (podman's defaults stay podman's —
         // the image's official USER/WORKDIR apply).
@@ -444,11 +452,27 @@ mod tests {
         assert!(!a.contains(&"--cap-drop".to_string()));
         assert!(!a.contains(&"no-new-privileges".to_string()));
         // Podman's init binary as PID 1 (signal forwarding, zombie
-        // reaping) — always pinned, no image dependency.
+        // reaping) — pinned whenever the pid namespace is private
+        // (the default), no image dependency.
         assert!(a.contains(&"--init".to_string()));
         // Heartbeat main process.
         assert_eq!(a[a.len() - 2], "sleep");
         assert_eq!(a.last().unwrap(), "infinity");
+    }
+
+    #[test]
+    fn init_binary_depends_on_the_pid_namespace() {
+        // `--init` is impossible in a shared pid namespace (podman
+        // rejects the combination); a toolbox-style `pid = "host"`
+        // must render without it, and the command is PID 1.
+        let mut tb = spec();
+        tb.pid = Some("host".into());
+        let a = Podman::create_args("tb", &tb);
+        assert!(!a.contains(&"--init".to_string()));
+        // An explicit `pid = "private"` keeps the init binary.
+        tb.pid = Some("private".into());
+        let a = Podman::create_args("tb", &tb);
+        assert!(a.contains(&"--init".to_string()));
     }
 
     #[test]
