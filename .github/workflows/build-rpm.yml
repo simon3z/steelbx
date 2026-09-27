@@ -19,7 +19,7 @@ jobs:
       # the REST API and no .git directory is created
       - name: Install build deps
         run: |
-          dnf install -y cargo rpm-build rpmlint xz git
+          dnf install -y cargo rust-packaging rpm-build rpmlint xz git
 
       - uses: actions/checkout@v5
         with:
@@ -33,9 +33,7 @@ jobs:
 
       - name: Lint spec + RPM
         continue-on-error: true
-        run: |
-          rpmlint steelbx.spec
-          rpmlint ~/rpmbuild/RPMS/x86_64/steelbx-*.x86_64.rpm
+        run: ./rpm-build.sh lint
 
       - name: Upload RPM artifact
         uses: actions/upload-artifact@v4

@@ -1,0 +1,16 @@
+# Bash completion for steelbx. Installed by the RPM to
+# %{_datadir}/bash-completion/completions/steelbx; the bash-completion
+# package sources it automatically.
+#
+# steelbx supports dynamic completion via the clap_complete engine:
+# the wrapper re-invokes the binary (COMPLETE=bash steelbx ...) and
+# returns the matching options.
+_steelbx_bash_autocomplete() {
+    local cur opts
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    opts=$(COMPLETE=bash steelbx "${COMP_WORDS[@]:1:$COMP_CWORD}")
+    COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+    return 0
+}
+complete -F _steelbx_bash_autocomplete -o default steelbx
