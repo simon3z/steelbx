@@ -39,9 +39,9 @@ enum Cmd {
         /// Completes from the profiles dirs.
         #[arg(short = 'p', long = "profile", add = ArgValueCompleter::new(profile_candidates))]
         profile: Option<String>,
-        /// Image override for the profile's `image` key (must be local:
-        /// steelbx consumes images, it does not pull them). Completes
-        /// from local images carrying the `com.github.simon3z.steelbx.box` or
+        /// Image override for the profile's `image` key (auto-pulled
+        /// if not local). Completes from local images carrying the
+        /// `com.github.simon3z.steelbx.box` or
         /// `com.github.containers.toolbox` label.
         #[arg(short = 'i', long = "image", add = ArgValueCompleter::new(image_candidates))]
         image: Option<String>,
@@ -63,8 +63,8 @@ enum Cmd {
         /// profiles dirs.
         #[arg(short = 'p', long = "profile", add = ArgValueCompleter::new(profile_candidates))]
         profile: Option<String>,
-        /// Image override (must be local). Completes from marked local
-        /// images.
+        /// Image override (auto-pulled if not local). Completes from
+        /// marked local images.
         #[arg(short = 'i', long = "image", add = ArgValueCompleter::new(image_candidates))]
         image: Option<String>,
         /// Box name to pin; absent → a generated unique name.

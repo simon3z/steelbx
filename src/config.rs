@@ -341,9 +341,8 @@ fn validate_init(init: &mut Option<crate::driver::Init>) -> Result<()> {
 /// labels).
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct SteelbxConfig {
-    /// The image name (steelbx consumes images, it does not pull
-    /// them); a profile sets it so `steelbx create <profile>` is
-    /// self-contained. CLI `-i` overrides it; absent = `-i` is
+    /// The image name (auto-pulled if not local); a profile sets it so
+    /// `steelbx create <profile>` is self-contained. CLI `-i` overrides it; absent = `-i` is
     /// required. Expanded like every other string value.
     #[serde(default)]
     pub image: Option<String>,

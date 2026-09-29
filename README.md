@@ -54,7 +54,7 @@ enough to trust.
 |---|---|
 | A1 | The threat model is **unsupervised workload misbehavior**: code inside the box acting wrongly. We are **not** protecting the workload from a malicious human. |
 | A2 | The workload's network egress is a **capability surface**, and what it can reach is a **design variable** — not an accident. |
-| A3 | We accept **image supply-chain risk** as out of scope for v0. The workload is expected to be able to `sudo` inside the box anyway (containers are not security boundaries against the workload). |
+| A3 | We accept **image supply-chain risk** as out of scope for v0 — steelbx auto-pulls an image when it is not local, and trusting a pulled image is on the caller. The workload is expected to be able to `sudo` inside the box anyway (containers are not security boundaries against the workload). |
 
 ## When steelbx is the right tool
 
@@ -90,8 +90,8 @@ Enter with: steelbx enter my-workload-1a2b3c4d
 
 - `create [-p <profile>] [-i <image>] [-n <box-name>] <paths...>` — the
   profile (default: `default`) selects the policy; the image comes
-  from the profile's `image` key (overridable with `-i`) and must be
-  local (steelbx consumes images, it does not pull them); the box
+  from the profile's `image` key (overridable with `-i`; auto-pulled
+  if not local); the box
   name is `-n` when given, otherwise a generated unique name built on
   the image's declared base (its `com.github.simon3z.steelbx.box.name`
   label, else the image's name component without tag), e.g.
@@ -252,8 +252,8 @@ image + config + CLI add layout and policy on top.
 
 | Input | Behavior |
 |---|---|
-| `image` (profile) | The image this policy applies to; must be local. Its `WORKDIR` is the mount base (overridable below) — an image with no `WORKDIR` gets the default layout `/work`. |
-| `-i` (CLI) | Image override for one create (the profile's `image` is the default); must be local. |
+| `image` (profile) | The image this policy applies to; auto-pulled if not local. Its `WORKDIR` is the mount base (overridable below) — an image with no `WORKDIR` gets the default layout `/work`. |
+| `-i` (CLI) | Image override for one create (the profile's `image` is the default); auto-pulled if not local. |
 | CLI paths | Each is canonicalized and bind-mounted at `<workdir>/<basename>`; there is no `dest` to declare. |
 | `workdir` (config) | The layout override (a container path, expanded): precedence over the image's `WORKDIR` and the `/work` default. Rendered as a create-time `--workdir` and the mount base; `enter`/`exec` run in the container's own working directory. Re-basing where the image's tools expect their files is the profile author's, reviewed, choice. |
 | `network` (config) | A podman network value; omitted = podman's default (no flag passed); `"none"` disables. |
