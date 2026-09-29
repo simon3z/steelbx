@@ -272,8 +272,11 @@ fn run_session(pod: &Podman, name: &str, spec: &CreateSpec, env: &[String], prof
         }
     };
     // Always force-remove: works whether the session is running or in the
-    // created state (kill is best-effort/ignored).
-    let _ = pod.remove_container(name, true);
+    // created state (kill is best-effort/ignored). A hard cleanup failure
+    // must not read as success — the box leaks if we stay silent.
+    if let Err(e) = pod.remove_container(name, true) {
+        eprintln!("warning: box '{name}' still exists ({e})");
+    }
     if INTERRUPTED.load(Ordering::SeqCst) {
         130
     } else {
