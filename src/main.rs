@@ -185,7 +185,7 @@ fn cmd_create(
     paths: &[String],
 ) -> anyhow::Result<()> {
     let pod = Podman::detect()?;
-    if !is_remote() {
+    if !driver::Podman::is_remote() {
         driver::warn_rootful();
     }
     let (spec, meta) = prepare_create(&pod, profile, image, paths)?;
@@ -230,7 +230,7 @@ fn cmd_run(
         Ok(p) => p,
         Err(e) => return run_fail(e),
     };
-    if !is_remote() {
+    if !driver::Podman::is_remote() {
         driver::warn_rootful();
     }
     let (spec, meta) = match prepare_create(&pod, profile, image, paths) {
@@ -453,11 +453,6 @@ fn provision_env() -> anyhow::Result<()> {
         }
     }
     Ok(())
-}
-
-/// Whether steelbx is in remote mode (a podman connection is active).
-fn is_remote() -> bool {
-    std::env::var_os("CONTAINER_HOST").is_some()
 }
 
 /// Default box name (when `-n` is absent): the image's name component

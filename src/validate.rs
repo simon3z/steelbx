@@ -28,17 +28,12 @@ pub(crate) fn expand_tilde(path: &str) -> PathBuf {
 /// host — skip the filesystem check and trust it.
 pub(crate) fn canonicalize(path: &str) -> Result<PathBuf> {
     let expanded = expand_tilde(path);
-    if is_remote() {
+    if crate::driver::Podman::is_remote() {
         // Remote: the path is on the remote host; trust it.
         Ok(expanded)
     } else {
         std::fs::canonicalize(&expanded).with_context(|| format!("resolving path '{path}'"))
     }
-}
-
-/// Whether steelbx is in remote mode (a podman connection is active).
-fn is_remote() -> bool {
-    std::env::var_os("CONTAINER_HOST").is_some()
 }
 
 /// Mount derivation (image-as-distribution): each host path from the CLI

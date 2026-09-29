@@ -106,10 +106,18 @@ pub struct BoxRow {
     pub created: String,
 }
 impl Podman {
+    /// Whether steelbx is in remote mode: a podman connection is active
+    /// (`CONTAINER_HOST` set). The single source for the check — remote
+    /// mode picks `podman-remote`, skips local path validation, and
+    /// suppresses the rootful warning.
+    pub fn is_remote() -> bool {
+        std::env::var_os("CONTAINER_HOST").is_some()
+    }
+
     /// The podman binary name: `podman-remote` in remote mode
     /// (`CONTAINER_HOST` set), `podman` otherwise.
     pub fn binary() -> &'static str {
-        if std::env::var_os("CONTAINER_HOST").is_some() {
+        if Self::is_remote() {
             "podman-remote"
         } else {
             "podman"
