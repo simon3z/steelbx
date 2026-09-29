@@ -21,6 +21,7 @@ pub fn set_verbose(v: bool) {
 }
 
 /// Supported podman major versions (fail loud with the range).
+/// When this window moves, note it in the spec's `%changelog`.
 fn supported(major: u64) -> bool {
     matches!(major, 5 | 6)
 }
@@ -31,6 +32,24 @@ fn supported(major: u64) -> bool {
 /// time-boxed. `timeout` is coreutils, present on the supported Fedora
 /// baseline.
 const CALL_TIMEOUT_SECS: &str = "120";
+
+/// A name collision at create: a dedicated error so callers detect
+/// the collision by type (the unique-name retry downcasts it) instead
+/// of string-matching podman's wording.
+#[derive(Debug)]
+pub struct NameInUse {
+    pub name: String,
+}
+impl std::fmt::Display for NameInUse {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "box '{}' already exists\nRemove it first: steelbx rm {}",
+            self.name, self.name
+        )
+    }
+}
+impl std::error::Error for NameInUse {}
 
 /// A detected, version-guarded podman.
 pub struct Podman;
@@ -293,7 +312,9 @@ impl Podman {
             let msg = format!("{e}");
             // Name collision: nothing was created, no rollback needed.
             if msg.contains("already in use") {
-                bail!("box '{box_name}' already exists\nRemove it first: steelbx rm {box_name}");
+                bail!(NameInUse {
+                    name: box_name.to_string()
+                });
             }
             // Roll back only a half-built container that exists: a
             // rejected create (a bad flag) often leaves nothing, and

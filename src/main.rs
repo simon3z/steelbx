@@ -345,8 +345,10 @@ fn create_with_unique_retry(pod: &Podman, spec: &CreateSpec, base: &str) -> anyh
         match pod.create(&name, spec) {
             Ok(()) => return Ok(name),
             Err(e) => {
-                // The driver's collision error reads "already exists".
-                if tries < MAX_TRIES && format!("{e}").contains("already exists") {
+                // Name collision: retry with a fresh generated name.
+                // Typed (not string-matched) — the driver raises
+                // `NameInUse`.
+                if tries < MAX_TRIES && e.downcast_ref::<driver::NameInUse>().is_some() {
                     tries += 1;
                     continue;
                 }
