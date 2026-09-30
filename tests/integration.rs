@@ -118,8 +118,12 @@ fn create_test_box(
     let work = tempfile::tempdir().unwrap();
     let proj = work.path().join("proj");
     std::fs::create_dir(&proj).unwrap();
-    let mounts =
-        steelbx::validate::derive_mounts(&[proj.to_str().unwrap().to_string()], workdir).unwrap();
+    let mounts = steelbx::validate::derive_mounts(
+        &[proj.to_str().unwrap().to_string()],
+        workdir,
+        &steelbx::validate::MountDest::Basename,
+    )
+    .unwrap();
     let spec = steelbx::driver::CreateSpec {
         image: image.to_string(),
         mounts,

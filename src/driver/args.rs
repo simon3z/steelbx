@@ -9,7 +9,8 @@ use indexmap::IndexMap;
 use super::Podman;
 
 /// One derived bind mount: canonical host path → box destination
-/// (`<workdir>/<basename>`, from the image's WORKDIR).
+/// (`<workdir>/<basename>` under the mount base by default, or at the
+/// host path itself with `mount_dest = "absolute"`).
 pub struct Mount {
     /// Canonical host path.
     pub host: PathBuf,
@@ -108,6 +109,10 @@ pub struct CreateSpec {
     /// podman `--workdir`; absent ⇒ the image's own `WORKDIR`.
     pub workdir: Option<String>,
     pub mounts: Vec<Mount>,
+    /// Podman `--mount` options appended to each derived bind mount
+    /// (the config `mount_options` key, e.g. `chown=true`); podman
+    /// interprets them; absent = no options (podman's defaults).
+    pub mount_options: Vec<String>,
     pub network: Option<String>,
     pub extra_hosts: Vec<String>,
     /// Env overrides (podman `--env KEY=VALUE`); same-key wins over the
@@ -163,6 +168,7 @@ impl From<&crate::config::SteelbxConfig> for CreateSpec {
             workdir: None,
             mounts: vec![],
             command: vec![],
+            mount_options: cfg.mount_options.clone(),
             network: cfg.network.clone(),
             extra_hosts: cfg.extra_hosts.clone(),
             env: cfg.env.clone(),
@@ -240,11 +246,25 @@ impl Podman {
     /// `--add-host` entries: the layout and policy strings, in
     /// declaration order.
     fn mount_flags(args: &mut Vec<String>, spec: &CreateSpec) {
+        // The profile's `mount_options` (e.g. `chown=true`), appended to
+        // every derived bind mount; podman interprets them. Absent = no
+        // options (podman's defaults).
+        let opts = spec.mount_options.join(",");
         for m in &spec.mounts {
+            let tail = if opts.is_empty() {
+                String::new()
+            } else {
+                format!(",{opts}")
+            };
             Self::flag(
                 args,
                 "--mount",
-                &format!("type=bind,src={},dst={}", m.host.to_string_lossy(), m.dest),
+                &format!(
+                    "type=bind,src={},dst={}{}",
+                    m.host.to_string_lossy(),
+                    m.dest,
+                    tail
+                ),
             );
         }
         if let Some(net) = &spec.network {
@@ -563,6 +583,35 @@ mod tests {
             .position(|x| x == "type=bind,src=/work,dst=/root/.pi/foo")
             .unwrap();
         assert_eq!(a[i - 1], "--mount");
+    }
+
+    #[test]
+    fn mount_options_are_appended_to_derived_mounts_only() {
+        // Absent: the derived bind mount carries no options.
+        let a = Podman::create_args("pi", &spec());
+        let i = a
+            .iter()
+            .position(|x| x == "type=bind,src=/work,dst=/root/.pi/foo")
+            .unwrap();
+        assert_eq!(a[i - 1], "--mount");
+
+        // Declared: the options are appended to the derived bind mount,
+        // and only to derived mounts (passthrough specs are untouched).
+        let mut s = spec();
+        s.mount_options = vec!["chown=true".into(), "ro=true".into()];
+        s.mount_specs = vec!["type=devpts,destination=/dev/pts".into()];
+        let a = Podman::create_args("pi", &s);
+        let i = a
+            .iter()
+            .position(|x| x == "type=bind,src=/work,dst=/root/.pi/foo,chown=true,ro=true")
+            .unwrap();
+        assert_eq!(a[i - 1], "--mount");
+        // The passthrough spec is rendered verbatim (no options injected).
+        let j = a
+            .iter()
+            .position(|x| x == "type=devpts,destination=/dev/pts")
+            .unwrap();
+        assert_eq!(a[j - 1], "--mount");
     }
 
     #[test]

@@ -15,8 +15,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use indexmap::IndexMap;
 
 use crate::validate::{
-    canonicalize, validate_env, validate_extra_hosts, validate_mount_specs, validate_ns_value,
-    validate_security_opts,
+    canonicalize, validate_env, validate_extra_hosts, validate_mount_options, validate_mount_specs,
+    validate_ns_value, validate_security_opts, MountDest,
 };
 
 /// The config dir: `$HOME/.config/steelbx` (the XDG config location,
@@ -554,6 +554,23 @@ pub struct SteelbxConfig {
     /// `WORKDIR` and the `/work` default.
     #[serde(default)]
     pub workdir: Option<String>,
+    /// Where the derived mounts are placed inside the box: `basename`
+    /// (the default) — under the mount base (`<base>/<basename>`, the
+    /// `workdir` override > the image's `WORKDIR` > `/work`) — or
+    /// `absolute` — each host path mounted at its own full path. A
+    /// keyword: not expanded, shape-checked.
+    #[serde(default)]
+    pub mount_dest: Option<String>,
+    /// Podman `--mount` options appended to each derived bind mount
+    /// (e.g. `chown=true`, `ro=true`): podman
+    /// interprets them (argv-vector safe); shape-checked (no spaces,
+    /// `key=value` tokens, and the keys steelbx itself sets on a derived
+    /// mount — `type`, `src`/`source`, `dst`/`destination` — cannot be
+    /// re-specified). Most useful with `mount_dest = "absolute"` (e.g.
+    /// `chown=true` lets a non-root box user write into a host path it
+    /// does not own). Absent = no options (podman's defaults).
+    #[serde(default)]
+    pub mount_options: Vec<String>,
     /// `user` absent = root; runs right after create, before the box
     /// is handed over.
     #[serde(default)]
@@ -817,6 +834,7 @@ impl SteelbxConfig {
         }
         validate_security_opts(&cfg.security_opts)?;
         validate_mount_specs(&cfg.mounts)?;
+        validate_mount_options(&cfg.mount_options)?;
         Self::warn_anonymous_volume_mounts(cfg);
         validate_ns_and_ulimits(cfg)?;
         validate_workdir(&cfg.workdir)?;
@@ -834,6 +852,9 @@ impl SteelbxConfig {
         // `image = ""` means "no image declared", same as omitting it.
         cfg.network = trim_or_absent(cfg.network.take());
         cfg.image = trim_or_absent(cfg.image.take());
+        cfg.mount_dest = trim_or_absent(cfg.mount_dest.take());
+        // `mount_dest` is a keyword (like `workdir` values): shape-checked.
+        MountDest::parse(cfg.mount_dest.as_deref())?;
         Ok(())
     }
 
@@ -970,6 +991,53 @@ mod tests {
         assert!(SteelbxConfig::load_from(&p).is_err());
         std::fs::write(&p, "workdir = \"/\"\n").unwrap();
         assert!(SteelbxConfig::load_from(&p).is_ok());
+    }
+
+    #[test]
+    fn mount_dest_keyword_is_loaded_and_shape_checked() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("containers.conf");
+        std::fs::write(&p, "mount_dest = \"absolute\"\n").unwrap();
+        let cfg = SteelbxConfig::load_from(&p).unwrap();
+        assert_eq!(cfg.mount_dest.as_deref(), Some("absolute"));
+        // Empty = absent = the default (workdir).
+        std::fs::write(&p, "mount_dest = \"  \"\n").unwrap();
+        let cfg = SteelbxConfig::load_from(&p).unwrap();
+        assert_eq!(cfg.mount_dest, None);
+        // An unknown keyword is an error.
+        std::fs::write(&p, "mount_dest = \"wherever\"\n").unwrap();
+        assert!(SteelbxConfig::load_from(&p).is_err());
+    }
+
+    #[test]
+    fn mount_options_are_loaded_and_shape_checked() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("containers.conf");
+        // Absent = no options.
+        std::fs::write(&p, "image = \"img\"\n").unwrap();
+        let cfg = SteelbxConfig::load_from(&p).unwrap();
+        assert!(cfg.mount_options.is_empty());
+        // Well-formed options are loaded verbatim (a single option and a
+        // comma-separated list).
+        std::fs::write(
+            &p,
+            "image = \"img\"\nmount_options = [\"chown=true\", \"ro=true,idmap=true\"]\n",
+        )
+        .unwrap();
+        let cfg = SteelbxConfig::load_from(&p).unwrap();
+        assert_eq!(
+            cfg.mount_options,
+            vec!["chown=true".to_string(), "ro=true,idmap=true".to_string()]
+        );
+        // A space is an error (hostile input; podman specs have no spaces).
+        std::fs::write(&p, "image = \"img\"\nmount_options = [\"chown = true\"]\n").unwrap();
+        assert!(SteelbxConfig::load_from(&p).is_err());
+        // Not a key=value token is an error.
+        std::fs::write(&p, "image = \"img\"\nmount_options = [\"chown\"]\n").unwrap();
+        assert!(SteelbxConfig::load_from(&p).is_err());
+        // A key steelbx sets on a derived mount cannot be re-specified.
+        std::fs::write(&p, "image = \"img\"\nmount_options = [\"type=volume\"]\n").unwrap();
+        assert!(SteelbxConfig::load_from(&p).is_err());
     }
 
     #[test]

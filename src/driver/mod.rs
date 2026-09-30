@@ -56,7 +56,8 @@ pub struct Podman;
 
 /// What `create` reads from the image in one `podman image inspect`
 /// (no N+1): the layout (WORKDIR, the image's own field — the mount
-/// derivation base: host paths land at `<workdir>/<basename>`) and
+/// derivation base for `mount_dest = "basename": host paths land at
+/// `<workdir>/<basename>`) and
 /// the optional declared default box name (`com.github.simon3z.steelbx.box.name`).
 pub struct ImageMeta {
     /// The image's WORKDIR; `None` ⇒ the default layout `/work`.

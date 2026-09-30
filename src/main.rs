@@ -54,7 +54,8 @@ enum Cmd {
         /// Completes from the live boxes.
         #[arg(short = 'n', long = "name", add = ArgValueCompleter::new(box_name_candidates))]
         box_name: Option<String>,
-        /// Host paths, mounted at <WORKDIR>/<basename>
+        /// Host paths, mounted at <WORKDIR>/<basename> (the profile key
+        /// mount_dest = absolute mounts each at its own full path)
         #[arg(value_hint = ValueHint::DirPath)]
         paths: Vec<String>,
     },
@@ -82,7 +83,8 @@ enum Cmd {
         /// injected.
         #[arg(short = 'e', long = "env")]
         env: Vec<String>,
-        /// Host paths, mounted at <WORKDIR>/<basename>
+        /// Host paths, mounted at <WORKDIR>/<basename> (the profile key
+        /// mount_dest = absolute mounts each at its own full path)
         #[arg(value_hint = ValueHint::DirPath)]
         paths: Vec<String>,
     },
@@ -432,8 +434,10 @@ fn create_with_unique_retry(
 /// The mount layout: the profile's `workdir` override > the image's
 /// WORKDIR > the default `/work`. The override renders as `--workdir`
 /// (regular container behavior — enter/exec run in the container's own
-/// working directory); the resolved value is the mount base (where
-/// derived mounts land).
+/// working directory); the resolved value is the mount base, and the
+/// profile's `mount_dest` decides where derived mounts land —
+/// `<base>/<basename>` (the default) or each host path at its own full
+/// path (`absolute`).
 fn create_layout(
     cfg: &SteelbxConfig,
     meta: &driver::ImageMeta,
@@ -448,7 +452,8 @@ fn create_layout(
         .as_deref()
         .or(meta.workdir.as_deref())
         .unwrap_or("/work");
-    let mounts = steelbx::validate::derive_mounts(paths, mount_base)?;
+    let dest = steelbx::validate::MountDest::parse(cfg.mount_dest.as_deref())?;
+    let mounts = steelbx::validate::derive_mounts(paths, mount_base, &dest)?;
     Ok((workdir, mounts))
 }
 
@@ -993,6 +998,28 @@ mod tests {
                 "bash -n failed on the generated script: {}",
                 String::from_utf8_lossy(&o.stderr)
             );
+        }
+    }
+
+    /// zsh compdef breaks on unescaped special characters in the
+    /// emitted script (clap#1596, #4848). The zsh generator escapes the
+    /// option/flag help but NOT the positional-arg help — the `paths`
+    /// doc comment is the one place a raw backtick could reach the
+    /// script; it must always come out escaped (`\``).
+    #[test]
+    fn zsh_completion_has_no_unescaped_backticks() {
+        let mut cmd = Cli::command();
+        let mut buf = Vec::new();
+        generate(Shell::Zsh, &mut cmd, "steelbx", &mut buf);
+        for line in String::from_utf8_lossy(&buf).lines() {
+            let line = line.trim_end();
+            if let Some(i) = line.find('`') {
+                assert_eq!(
+                    line.as_bytes().get(i.saturating_sub(1)),
+                    Some(&b'\\'),
+                    "unescaped backtick in the zsh completion: {line}"
+                );
+            }
         }
     }
 }

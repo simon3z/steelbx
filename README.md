@@ -98,7 +98,8 @@ Enter with: steelbx enter my-workload-1a2b3c4d
   the image's declared base (its `com.github.simon3z.steelbx.box.name`
   label, else the image's name component without tag), e.g.
   `pi-steelbx-a1b2c3d4`; each `<path>` is bind-mounted at
-  `<WORKDIR>/<basename>`; the box is left in `created` state and
+  `<WORKDIR>/<basename>` (or at its own full path with the profile's
+  `mount_dest = "absolute"`); the box is left in `created` state and
   started on its first `enter`
 
 - `run [-p <profile>] [-i <image>] [-n <name>] [-e NAME] <paths...>` —
@@ -289,6 +290,8 @@ are not tracked by the label.
 | `name` (config) | The declared box-name base; expanded against the caller env plus `env_files` (it is decided first, so it cannot reference `[env]` values) and shape-checked (a valid podman name; empty is absent). Unique by default: a fresh random token is appended unless `name_unique = false` (then pinned verbatim — a taken name is an error). Precedence: the `-n` flag (verbatim) > this key > a generated unique name from the image base. The effective name is the `STEELBX_BOX_NAME` expansion variable. |
 | `name_unique` (config) | Whether a declared `name` gets a fresh random token appended: unique by default; `false` pins the name verbatim. Absent = `true`; only applies when `name` is present. |
 | CLI paths | Each is canonicalized and bind-mounted at `<workdir>/<basename>`; there is no `dest` to declare. |
+| `mount_dest` (config) | Where the derived mounts land: `basename` (the default) — `<workdir>/<basename>` under the mount base — or `absolute` — each host path mounted at its own full path. |
+| `mount_options` (config) | Podman `--mount` options appended to each derived bind mount (e.g. `chown=true`, `ro=true`); podman interprets them, shape-checked (no spaces, `key=value` tokens). `chown=true` recursively chowns the host source to the box's UID/GID so a non-root box user can write into a host path it does not own — most useful with `mount_dest = "absolute"`. Absent = no options (podman's defaults). The keys steelbx sets on a derived mount (`type`, `src`/`source`, `dst`/`destination`) cannot be re-specified. |
 | `workdir` (config) | The layout override (a container path, expanded): precedence over the image's `WORKDIR` and the `/work` default. Rendered as a create-time `--workdir` and the mount base; `enter`/`exec` run in the container's own working directory. Re-basing where the image's tools expect their files is the profile author's, reviewed, choice. |
 | `network` (config) | A podman network value; omitted = podman's default (no flag passed); `"none"` disables. |
 | `extra_hosts` (config) | `host:ip` entries or the `host-gateway` keyword — how host services are reached from inside. |
