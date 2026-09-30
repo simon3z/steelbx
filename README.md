@@ -398,7 +398,7 @@ exist there — local path validation is skipped in remote mode.
 
 [badge-github]: https://img.shields.io/badge/github-simon3z/steelbx-6f57b0.svg?logo=github
 [badge-license]: https://img.shields.io/badge/license-Apache_2.0-blue.svg
-[badge-version]: https://img.shields.io/badge/version-0.1.0-ff8000.svg
+[badge-version]: https://img.shields.io/badge/version-0.1.1-ff8000.svg
 [badge-rust]: https://img.shields.io/badge/rust-edition_2021-steelblue.svg
 [badge-deps]: https://img.shields.io/badge/dependencies-6-green.svg
 [badge-ci]: https://github.com/simon3z/steelbx/actions/workflows/ci.yml/badge.svg

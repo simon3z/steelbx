@@ -1,7 +1,7 @@
 %bcond_without check
 
 Name:           steelbx
-Version:        0.1.0
+Version:        0.1.1
 # Release: computed by rpm-build.sh (--define release N = commits since
 # the last tag + 1); defaults to 1 when release is not defined.
 Release:        %{?release}%{!?release:1}%{?dist}
@@ -107,6 +107,9 @@ cargo test --release --offline --frozen --lib --bins
 # the last tag + 1); this entry and Release: expand from the same macro,
 # so the changelog always matches the built Release.
 %changelog
+* Sun Sep 27 2026 Federico Simoncelli <federico.simoncelli@gmail.com> - 0.1.1-%{?release}%{!?release:1}
+- Updated to upstream 0.1.1
+
 * Sun Sep 20 2026 Federico Simoncelli <federico.simoncelli@gmail.com> - 0.1.0-%{?release}%{!?release:1}
 - Initial RPM: podman-driven workload runner with profile-based config,
   dynamic bash completion, and self-contained offline build
