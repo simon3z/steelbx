@@ -1,16 +1,16 @@
-# Bash completion for steelbx. Installed by the RPM to
-# %{_datadir}/bash-completion/completions/steelbx; the bash-completion
-# package sources it automatically.
 #
-# steelbx supports dynamic completion via the clap_complete engine:
-# the wrapper re-invokes the binary (COMPLETE=bash steelbx ...) and
-# returns the matching options.
-_steelbx_bash_autocomplete() {
-    local cur opts
-    COMPREPLY=()
-    cur="${COMP_WORDS[COMP_CWORD]}"
-    opts=$(COMPLETE=bash steelbx "${COMP_WORDS[@]:1:$COMP_CWORD}")
-    COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-    return 0
-}
-complete -F _steelbx_bash_autocomplete -o default steelbx
+# Dynamic bash completion for steelbx (installed by the RPM into
+# /usr/share/bash-completion/completions).
+#
+# The binary generates its own completion registration at source time
+# (clap_complete "dynamic" protocol), so this file is nothing but the
+# one-liner installer you would put in your shell rc:
+#
+#   source <(COMPLETE=bash steelbx)
+#
+# There is nothing here that can drift out of sync: an upgrade ships the
+# same file, and the installed binary always produces the matching
+# script.
+#
+[ -n "${BASH_VERSION}" ] && command -v steelbx >/dev/null && \
+  source <(COMPLETE=bash steelbx)

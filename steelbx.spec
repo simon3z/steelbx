@@ -65,20 +65,10 @@ mkdir -p %{buildroot}/etc/steelbx/profiles
 for f in examples/*.conf; do
     install -m 0644 "$f" %{buildroot}/etc/steelbx/profiles/
 done
-# Dynamic bash completion (clap_complete engine): a wrapper that
-# re-invokes the binary (COMPLETE=bash steelbx ...).
-cat > steelbx-completion <<'EOF'
-_steelbx_bash_autocomplete() {
-    local cur opts
-    COMPREPLY=()
-    cur="${COMP_WORDS[COMP_CWORD]}"
-    opts=$(COMPLETE=bash steelbx "${COMP_WORDS[@]:1:$COMP_CWORD}")
-    COMPREPLY=( $(compgen -W "${opts}" -- "${cur}" ) )
-    return 0
-}
-complete -F _steelbx_bash_autocomplete -o default steelbx
-EOF
-install -Dm 0644 steelbx-completion \
+# Dynamic bash completion: the source-tree file sources the binary's
+# own registration at load time (clap_complete dynamic protocol), so
+# the shipped file can never drift out of sync with the binary.
+install -Dm 0644 completions/steelbx \
     %{buildroot}%{_datadir}/bash-completion/completions/steelbx
 
 # Ship the bundled crates' license files to the package license directory
