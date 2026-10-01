@@ -1,0 +1,41 @@
+# Vendored interface definition.
+#
+# Verbatim from container-selinux 2.251.0-1.fc44, container.if:978-1010.
+# container-selinux does not install container.if into
+# /usr/share/selinux/devel/include/, so the template is vendored here and
+# fed to stage-1 m4 by selinux-build.sh (where it becomes part of
+# all_interfaces.conf, like the distro's own .if files).
+# Re-sync from the container-selinux source on upgrade (see ../README.md).
+template(`container_manage_files_template',`
+	gen_require(`
+		attribute container_domain;
+		type container_runtime_t;
+		type container_var_lib_t;
+		type container_ro_file_t;
+	')
+
+
+	mls_rangetrans_target($1_t)
+	mcs_constrained($1_t)
+	role system_r types $1_t;
+
+	kernel_read_all_proc($1_t)
+
+	allow $1_t $2_file_t:dir_file_class_set { relabelfrom relabelto map };
+
+	manage_files_pattern($1_t, $2_file_t, $2_file_t)
+	exec_files_pattern($1_t, $2_file_t, $2_file_t)
+	manage_lnk_files_pattern($1_t, $2_file_t, $2_file_t)
+	manage_dirs_pattern($1_t, $2_file_t, $2_file_t)
+	manage_chr_files_pattern($1_t, $2_file_t, $2_file_t)
+	allow $1_t $2_file_t:chr_file { mmap_file_perms watch watch_reads };
+	manage_blk_files_pattern($1_t, $2_file_t, $2_file_t)
+	manage_fifo_files_pattern($1_t, $2_file_t, $2_file_t)
+	allow $1_t $2_file_t:fifo_file watch;
+	manage_sock_files_pattern($1_t, $2_file_t, $2_file_t)
+	allow $1_t $2_file_t:{file dir} mounton;
+	allow $1_t $2_file_t:filesystem { mount remount unmount };
+	allow $1_t $2_file_t:dir_file_class_set { relabelfrom relabelto map };
+
+	fs_tmpfs_filetrans($1_t, $2_file_t, { dir file lnk_file })
+')

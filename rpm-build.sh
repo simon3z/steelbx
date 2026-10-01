@@ -153,13 +153,13 @@ do_build() {
 # Lint the spec (from SPECS) and the built binary RPMs.
 do_lint() {
     ( cd "${RPM_TOP}/SPECS" && rpmlint "$SPEC" )
-    rpmlint "${RPM_TOP}/RPMS"/*/${NAME}-*.rpm
+    rpmlint "${RPM_TOP}/RPMS"/*/${NAME}*.rpm
 }
 
 echo "==> Building RPM for $NAME v$VERSION"
 do_build
 echo "==> Done"
-ls -lh "${RPM_TOP}/RPMS/x86_64/"${NAME}-*.rpm
+ls -lh "${RPM_TOP}/RPMS/x86_64/"${NAME}*.rpm
 
 case "${1:-}" in
     lint) do_lint ;;

@@ -24,6 +24,10 @@ BuildRequires:  rust
 # and the cargo_vendor fileattr hook: the shipped cargo-vendor.txt
 # becomes Provides: bundled(crate(<name>)) = <version> per vendored crate.
 BuildRequires:  rust-packaging
+# For the selinux subpackage (module compiled during %build)
+BuildRequires:  m4
+BuildRequires:  checkpolicy
+BuildRequires:  selinux-policy-devel
 
 # Bundled(crate(<name>) = <version> provides: the cargo_vendor fileattr
 # hook (cargo-rpm-macros) emits them from the shipped cargo-vendor.txt
@@ -32,6 +36,28 @@ BuildRequires:  rust-packaging
 %description
 %{summary}.
 
+%package selinux
+Summary:        SELinux module for steelbx boxes using host session resources
+# semodule (-i/-r in the scriptlets below)
+Requires:       policycoreutils
+
+%description selinux
+SELinux module for the steelbx container runner. It defines
+steelbx_wayland_t, a pre-canned container-side domain that a
+profile selects with
+  security_opts = ["label=type:steelbx_wayland_t"]
+which makes podman run the container's processes as that type
+instead of the default container_t.
+
+The domain is a literal mirror of container_t from container-selinux
+2.251.0: the same interface calls in the same order, so the
+attribute-scoped container grants (container_domain's self:* set,
+container_ro_file_t read/exec, ...) and any future container-selinux
+interface changes apply as-is, and only the type name is substituted.
+On top of the mirror, a permission group (steelbx_wayland_access)
+grants the host Wayland resources steelbx profiles bind-mount into
+the box (/run/user/<UID> wayland sockets, host config dirs), and a
+host-side grant lets system_dbusd_t toggle SELinux enforcement.
 %prep
 %autosetup -n %{name}-%{version}
 # Extract vendored deps + .cargo/config into the source tree
@@ -47,6 +73,13 @@ cargo build --release --offline --frozen
 # bundled(crate(<name>) = <version> provides.
 %cargo_vendor_manifest
 
+# Build the SELinux module for the selinux subpackage.
+# selinux-build.sh replicates the distro header build pipeline
+# (m4 -> checkmodule -> semodule_package); the distro Makefile in
+# /usr/share/selinux/devel resolves HEADERDIR incorrectly in some
+# environments.
+./selinux-build.sh selinux/steelbx_selinux.te steelbx_selinux.pp
+
 # Stage the license files of the bundled crates under unique names
 # (crate name prefix, to avoid basename clashes) for %%license packaging.
 mkdir -p bundled-licenses
@@ -59,6 +92,7 @@ done
 
 %install
 install -Dm 0755 target/release/steelbx %{buildroot}%{_bindir}/steelbx
+install -Dm 0644 steelbx_selinux.pp %{buildroot}%{_datadir}/selinux/packages/steelbx_selinux.pp
 gzip -9 man/steelbx.1
 install -Dm 0644 man/steelbx.1.gz %{buildroot}%{_mandir}/man1/steelbx.1.gz
 mkdir -p %{buildroot}/etc/steelbx/profiles
@@ -82,6 +116,33 @@ done
 %if %{with check}
 cargo test --release --offline --frozen --lib --bins
 %endif
+
+# No rpm macro exists for loading SELinux modules; these follow the
+# distro convention (hand-written shell, cf. container-selinux):
+# $1-guards, SELINUXTYPE from /etc/selinux/config, semodule -n -X 200,
+# and '|| :' so policy-load problems never fail the rpm transaction.
+%post selinux
+# $1 = number of package instances after install; 1 = fresh install.
+if [ $1 -eq 1 ] && [ -d /sys/fs/selinux ]; then
+    . /etc/selinux/config
+    semodule -n -s ${SELINUXTYPE} -X 200 -i \
+        %{_datadir}/selinux/packages/steelbx_selinux.pp || :
+else
+    echo "The SELinux module is not being loaded now (SELinux disabled"
+    echo "or upgrade). Load it with:"
+    echo "  semodule -i %{_datadir}/selinux/packages/steelbx_selinux.pp"
+fi
+
+%postun selinux
+# $1 = number of package instances left after removal; 0 = last one.
+if [ $1 -eq 0 ] && [ -d /sys/fs/selinux ]; then
+    . /etc/selinux/config
+    semodule -n -s ${SELINUXTYPE} -X 200 -r steelbx_selinux || :
+fi
+
+%files selinux
+%license LICENSE
+%{_datadir}/selinux/packages/steelbx_selinux.pp
 
 %files
 %license LICENSE

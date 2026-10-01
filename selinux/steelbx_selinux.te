@@ -1,0 +1,181 @@
+policy_module(steelbx_selinux, 1.0)
+
+#
+# steelbx_selinux: SELinux module defining steelbx_wayland_t, a pre-canned
+# container domain for steelbx boxes that run host-facing Wayland tools
+# (wl-copy today; more as needed).
+#
+# A profile opts in with
+#     security_opts = ["label=type:steelbx_wayland_t"]
+# which makes podman run the container's processes as this type instead of
+# the default container_t.
+#
+# Layout (see selinux/README.md for the update procedure):
+#
+#   SECTION 1 -- literal mirror of container_t. Every line corresponds 1:1
+#     to a cited source line (container-selinux container.te, or
+#     selinux-policy contrib/virt), with the single mechanical substitution
+#     container_t -> steelbx_wayland_t / container -> steelbx_wayland.
+#     container_t's attribute-scoped grants (the container_domain self:*
+#     set, container_ro_file_t read/exec, ...) are inherited automatically
+#     via the typeattribute membership and are NOT restated here.
+#
+#   SECTION 2 -- steelbx additions only: the container_runtime_t transition
+#     and fifo rules, the audit-derived cap_userns fsetid extension, and
+#     the steelbx_wayland_access permission group (host Wayland access).
+#
+# Mirrors: container-selinux 2.251.0-1.fc44, selinux-policy 44.10-1.fc44.
+#
+# Validation (on an enforcing host):
+#   sudo semodule -r steelbx_selinux; sudo semodule -i selinux/steelbx_selinux.pp
+#   steelbx --profile <profile with label=type:steelbx_wayland_t> up
+#   audit2allow -a /var/log/audit/audit.log   # iterate, add to section 2
+
+require {
+    # section 1: direct rules (the rest is covered by the gen_require
+    # blocks of the interface calls below)
+    type proc_t;
+    type container_var_run_t;
+    type container_file_t;
+
+    # section 2
+    type container_runtime_t;
+    type config_home_t;
+    type security_t;
+    type system_dbusd_t;
+    type unconfined_t;
+    type user_tmp_t;
+
+    attribute can_setenforce;
+    attribute container_domain;
+    attribute container_net_domain;
+    attribute container_user_domain;
+}
+
+# ============================================================================
+# SECTION 1 -- container_t mirror (literal copy)
+#
+# 1:1 copy of container_t's source definition, mechanical substitution
+# container_t -> steelbx_wayland_t / container -> steelbx_wayland, in
+# source order. Interface calls are expanded by the build (all_interfaces.conf,
+# see selinux-build.sh) exactly as in the distro build.
+# ============================================================================
+
+# virt.te:1847 (selinux-policy contrib/virt -- the source's comment in
+# container-te:953-955 notes "this is called in virt.te"; the template
+# declares `type steelbx_wayland_t, svirt_sandbox_domain' and grants the
+# base sandbox attributes: domain, corenet_unlabeled_type,
+# process_user_target, mlsrangetrans, mcs_constrained_type,
+# kernel_system_state_reader, can_dump_kernel, can_receive_kernel_messages,
+# syslog_client_type)
+virt_sandbox_domain_template(steelbx_wayland)
+
+# container-te:960 -- the template is vendored in selinux/vendor/
+# container_manage_files.if (container-selinux does not install container.if
+# as a header); selinux-build.sh feeds it to stage-1 m4.
+container_manage_files_template(steelbx_wayland, container)
+
+# container-te:963
+typeattribute steelbx_wayland_t container_domain, container_net_domain, container_user_domain;
+
+# container-te:1017
+dev_mounton_sysfs(steelbx_wayland_t)
+
+# container-te:1111
+domain_user_exemption_target(steelbx_wayland_t)
+
+# container-te:1116
+virt_sandbox_net_domain(steelbx_wayland_t)
+
+# container-te:1118
+logging_send_syslog_msg(steelbx_wayland_t)
+
+# container-te:1134-1135 -- in the source inside
+# tunable_policy('virt_sandbox_use_sys_admin', ...); that boolean is declared
+# in the container-selinux module, which is not available to this module,
+# so the grants are unconditional (source default: on).
+allow steelbx_wayland_t self:capability sys_admin;
+allow steelbx_wayland_t self:cap_userns sys_admin;
+
+# container-te:1141
+corenet_unconfined(steelbx_wayland_t)
+
+# container-te:1144 -- in the source inside optional_policy(...)
+virt_default_capabilities(steelbx_wayland_t)
+
+# container-te:1148
+kernel_read_messages(steelbx_wayland_t)
+
+# container-te:1237 -- in the source inside
+# tunable_policy('virt_sandbox_use_audit', ...); same as above,
+# unconditional (source default: on).
+logging_send_audit_msgs(steelbx_wayland_t)
+
+# container-te:1423
+allow steelbx_wayland_t proc_t:filesystem remount;
+
+# container-te:1426
+allow steelbx_wayland_t container_var_run_t:dir { list_dir_perms mounton };
+
+# container-te:1515
+dev_getattr_xserver_misc_dev(steelbx_wayland_t)
+
+# container-te:1516
+dev_rw_xserver_misc(steelbx_wayland_t)
+
+# ============================================================================
+# SECTION 2 -- steelbx additions (not from the container_t source)
+# ============================================================================
+
+# crun (running as container_runtime_t) switches the forked child into this
+# type by writing /proc/self/attr/current; the kernel requires a process
+# transition permission onto the target type.
+# AVC: denied { transition } for container_runtime_t -> steelbx_wayland_t:process
+allow container_runtime_t steelbx_wayland_t:process { transition };
+
+# podman-init writing into the conmon/crun stdin/stderr pipes.
+# AVC: denied { write } for steelbx_wayland_t -> container_runtime_t:fifo_file
+allow steelbx_wayland_t container_runtime_t:fifo_file { open read write };
+
+# The container_domain attribute set (container-te:1187) grants
+# self:cap_userns { chown dac_override fowner kill setgid setuid setpcap
+# net_bind_service net_raw sys_chroot mknod audit_write setfcap } -- no
+# fsetid. Observed entrypoint-tool denials required fsetid, so this is the
+# source set plus fsetid.
+allow steelbx_wayland_t self:cap_userns { chown dac_override fowner fsetid kill setgid setuid setpcap net_bind_service net_raw sys_chroot mknod audit_write setfcap };
+
+# --- permission group: host wayland access -------------------------------
+#
+# Each rule cites the audit denial that motivated it; grow this group with
+# audit2allow as more denials show up. Future steelbx_* types just take the
+# attribute to inherit the same grants.
+
+attribute steelbx_wayland_access;
+typeattribute steelbx_wayland_t steelbx_wayland_access;
+
+# find(1) listing the host's ~/.config dir bind-mounted into the box.
+# AVC: denied { read } for container_t -> config_home_t:dir (name="dconf")
+allow steelbx_wayland_access config_home_t:dir { read };
+
+# wl-copy writing to the host Wayland socket in $XDG_RUNTIME_DIR.
+# AVC: denied { write } for container_t -> user_tmp_t:sock_file (name="wayland-0")
+allow steelbx_wayland_access user_tmp_t:sock_file { write };
+
+# wl-copy connecting to the host Wayland socket (socket owner is an
+# unconfined_t host process).
+# AVC: denied { connectto } for container_t -> unconfined_t:unix_stream_socket
+#   (path="/run/user/1000/wayland-0")
+allow steelbx_wayland_access unconfined_t:unix_stream_socket { connectto };
+
+# wl-copy writing a Wayland memfd buffer.
+# AVC: denied { write } for container_t -> user_tmp_t:file
+#   (path="memfd:mutter-anonymous-file-wayland-keymap")
+allow steelbx_wayland_access user_tmp_t:file { write };
+
+# --- host-side: let the host dbus-broker toggle SELinux ------------------
+# USER_MAC_STATUS: subj=system_u:system_r:system_dbusd_t
+#   avc: op=setenforce lsm=selinux enforcing=0 res=1 exe="/usr/bin/dbus-broker"
+# Must go through the can_setenforce attribute: the kernel module has
+# neverallow ~{ can_setenforce } security_t:security setenforce.
+typeattribute system_dbusd_t can_setenforce;
+allow can_setenforce security_t:security { setenforce };

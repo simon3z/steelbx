@@ -19,7 +19,8 @@ jobs:
       # the REST API and no .git directory is created
       - name: Install build deps
         run: |
-          dnf install -y cargo rust-packaging rpm-build rpmlint xz git
+          dnf install -y cargo rust-packaging rpm-build rpmlint xz git \
+            checkpolicy m4 selinux-policy-devel
 
       - uses: actions/checkout@v5
         with:
