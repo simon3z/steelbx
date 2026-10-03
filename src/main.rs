@@ -45,10 +45,13 @@ enum Cmd {
         /// `com.github.containers.toolbox` label.
         #[arg(short = 'i', long = "image", add = ArgValueCompleter::new(image_candidates))]
         image: Option<String>,
-        /// Box name (container name). Default: the image's name
-        /// component without tag, e.g. `localhost/pi-steelbx:latest`
-        /// → `pi-steelbx`. A taken name is refused — pass `-n`
-        /// for another. Completes from the live boxes.
+        /// Box name (container name), pinned verbatim (no random
+        /// token). Precedence: this flag > the profile's `name` key
+        /// (unique by default: the key + a random token, unless
+        /// `name_unique = false`) > a generated unique name. The
+        /// effective name is available to profile values as
+        /// STEELBX_BOX_NAME. A taken pinned name is refused.
+        /// Completes from the live boxes.
         #[arg(short = 'n', long = "name", add = ArgValueCompleter::new(box_name_candidates))]
         box_name: Option<String>,
         /// Host paths, mounted at <WORKDIR>/<basename>
@@ -67,7 +70,11 @@ enum Cmd {
         /// marked local images.
         #[arg(short = 'i', long = "image", add = ArgValueCompleter::new(image_candidates))]
         image: Option<String>,
-        /// Box name to pin; absent → a generated unique name.
+        /// Box name to pin, verbatim (no random token). Precedence:
+        /// this flag, then the profile's `name` key (unique by
+        /// default), then a generated unique name. Profile values
+        /// reference the effective name (STEELBX_BOX_NAME is the
+        /// expansion variable).
         #[arg(short = 'n', long = "name", add = ArgValueCompleter::new(box_name_candidates))]
         box_name: Option<String>,
         /// Expose a caller env variable to the session (bare NAME).
@@ -188,33 +195,34 @@ fn cmd_create(
     if !driver::Podman::is_remote() {
         driver::warn_rootful();
     }
-    let (spec, meta) = prepare_create(&pod, profile, image, paths)?;
-    let created = create_box(&pod, &spec, &meta, box_name)?;
+    let (spec, name, base, hashed) = prepare_create(&pod, profile, image, paths, box_name)?;
+    let created = create_box(&pod, &spec, &name, &base, hashed)?;
     println!("Created box: {created}");
     println!("Enter with: steelbx enter {created}");
     Ok(())
 }
 
-/// Create the box with a name: `-n` explicit (validated; a taken name
-/// is an error), or a generated unique name (bounded retry on the
-/// ≈impossible collision). Shared by `create` and `run`; returns the
-/// name.
+/// Create the box: the name is always defined (declared or generated).
+/// Pinned names (the `-n` flag, or a `name_unique = false` profile key)
+/// are validated verbatim; a taken name is an error. Hashed names try
+/// the pre-decided name (what `STEELBX_BOX_NAME` referenced) first, then
+/// retry with fresh tokens on the ≈impossible collision. Shared by
+/// `create` and `run`; returns the name.
 fn create_box(
     pod: &Podman,
     spec: &CreateSpec,
-    meta: &driver::ImageMeta,
-    box_name: Option<&str>,
+    name: &str,
+    base: &str,
+    hashed: bool,
 ) -> anyhow::Result<String> {
-    match box_name {
-        Some(n) => {
-            if !driver::is_valid_name(n) {
-                anyhow::bail!("invalid box name: {n:?} — pass -n <name>");
-            }
-            pod.create(n, spec)?;
-            Ok(n.to_string())
+    if !hashed {
+        if !driver::is_valid_name(name) {
+            anyhow::bail!("invalid box name: {name:?}");
         }
-        None => create_with_unique_retry(pod, spec, &base_box_name(&spec.image, meta)),
+        pod.create(name, spec)?;
+        return Ok(name.to_string());
     }
+    create_with_unique_retry(pod, spec, base, Some(name))
 }
 
 /// Disposable box: create → enter → auto-rm. Like `podman run --rm`.
@@ -233,11 +241,11 @@ fn cmd_run(
     if !driver::Podman::is_remote() {
         driver::warn_rootful();
     }
-    let (spec, meta) = match prepare_create(&pod, profile, image, paths) {
+    let (spec, name, base, hashed) = match prepare_create(&pod, profile, image, paths, box_name) {
         Ok(x) => x,
         Err(e) => return run_fail(e),
     };
-    let name = match create_box(&pod, &spec, &meta, box_name) {
+    let name = match create_box(&pod, &spec, &name, &base, hashed) {
         Ok(n) => n,
         Err(e) => return run_fail(e),
     };
@@ -304,24 +312,52 @@ fn install_signal_trap() {
 /// Set by the signal handler when the session is interrupted.
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
-/// The shared create pipeline: load the profile, resolve the image
-/// (the `-i` flag > the profile's `image` key), one image inspect
-/// (layout WORKDIR + declared base name), derive the mount layout, and
-/// build the full spec. The box name is decided by the caller.
+/// The shared create pipeline: parse the profile (a complete
+/// `containers.conf` — replace semantics, no merging), pre-expand
+/// (`[env]`, `image`, and — unless the `-n` flag is present — the
+/// profile's `name` key), resolve the image (the `-i` flag > the
+/// expanded profile key), one image inspect (layout WORKDIR + declared
+/// base name), decide the box name — always defined: the `-n` flag
+/// (verbatim), the profile's `name` key (a fresh random token appended
+/// unless `name_unique = false`), or a generated unique name from the
+/// image base — so it is known before the rest of the profile expands,
+/// finish the expansion (`STEELBX_BOX_NAME` = the box name), derive the
+/// mount layout, and build the full spec. Returns
+/// (spec, box name, base, hashed).
 fn prepare_create(
     pod: &Podman,
     profile: &str,
     image: Option<&str>,
     paths: &[String],
-) -> anyhow::Result<(CreateSpec, driver::ImageMeta)> {
-    // Policy: the named profile (profiles/<name>.conf) — a complete
-    // `containers.conf` (replace semantics, no merging). Loaded before
-    // layout: a profile `workdir` overrides the base.
-    let cfg = SteelbxConfig::load_profile(profile)?;
-    // Image precedence: the `-i` flag > the profile's `image` key.
-    let image = resolve_image(image, &cfg, profile)?;
-    // One image inspect: layout (WORKDIR, overridable) + declared base name.
-    let meta = pod.image_meta(image)?;
+    box_name: Option<&str>,
+) -> anyhow::Result<(CreateSpec, String, String, bool)> {
+    // 1. Parse the profile (TOML only — no expansion, no validation).
+    let mut cfg = SteelbxConfig::parse_profile(profile)?;
+    // 2. Pre-pass: decide the name (the `-n` flag verbatim, else the
+    //    profile's `name` key — a fresh token appended unless
+    //    `name_unique = false`), and expand `[env]` and `image` with
+    //    the final name as `STEELBX_BOX_NAME`.
+    let (profile_image, declared, final_name) = SteelbxConfig::pre_expand(&mut cfg, box_name)?;
+    // 3. Image precedence: the `-i` flag > the expanded profile key.
+    let image = resolve_image(image, profile_image.as_deref(), profile)?;
+    // 4. One image inspect: layout (WORKDIR, overridable) + declared
+    //    base name.
+    let meta = pod.image_meta(&image)?;
+    // 5. The box name — always defined: the final name when declared
+    //    (verbatim when pinned); else a generated unique name from the
+    //    image base.
+    let (box_name, base, hashed) = if let Some(n) = box_name {
+        (n.to_string(), n.to_string(), false)
+    } else if let Some(d) = declared {
+        (final_name.clone().unwrap(), d.clone(), cfg.name_unique())
+    } else {
+        let b = base_box_name(&image, &meta);
+        (driver::unique_name(&b), b, true)
+    };
+    // 6. Full pass: expand the rest against the process env with
+    //    STEELBX_BOX_NAME = the box name; validate.
+    SteelbxConfig::finish_expand(&mut cfg, &box_name)?;
+    // 7. Build the create spec (policy layer: CLI > config > image).
     let (workdir, mounts) = create_layout(&cfg, &meta, paths)?;
     let spec = CreateSpec {
         image: image.to_string(),
@@ -331,17 +367,27 @@ fn prepare_create(
         runtime_env: merge_runtime_env(&cfg.runtime_env, &meta.env),
         ..(&cfg).into()
     };
-    Ok((spec, meta))
+    Ok((spec, box_name, base, hashed))
 }
 
-/// Create with a generated unique name, regenerating on the (≈impossible)
-/// name collision instead of failing — a bounded retry keeps a unique-name
-/// create self-healing.
-fn create_with_unique_retry(pod: &Podman, spec: &CreateSpec, base: &str) -> anyhow::Result<String> {
+/// Create with a hashed unique name: the pre-decided name (what
+/// `STEELBX_BOX_NAME` referenced) first, then regenerating on the
+/// (≈impossible) name collision instead of failing — a bounded retry
+/// keeps a unique-name create self-healing.
+fn create_with_unique_retry(
+    pod: &Podman,
+    spec: &CreateSpec,
+    base: &str,
+    first: Option<&str>,
+) -> anyhow::Result<String> {
     const MAX_TRIES: usize = 8;
     let mut tries = 0;
+    let mut first_pending = first;
     loop {
-        let name = driver::unique_name(base);
+        let name = first_pending
+            .take()
+            .map(str::to_string)
+            .unwrap_or_else(|| driver::unique_name(base));
         match pod.create(&name, spec) {
             Ok(()) => return Ok(name),
             Err(e) => {
@@ -383,25 +429,28 @@ fn create_layout(
 
 /// Image precedence: the `-i` flag > the profile's `image` key;
 /// neither = an error that names both ways out.
-fn resolve_image<'a>(
-    flag: Option<&'a str>,
-    cfg: &'a SteelbxConfig,
-    profile: &'a str,
-) -> anyhow::Result<&'a str> {
+/// The image: the CLI `-i` (when given), else the profile's `image`
+/// (already expanded by the pre-pass).
+fn resolve_image(
+    flag: Option<&str>,
+    profile_image: Option<&str>,
+    profile: &str,
+) -> anyhow::Result<String> {
     match flag {
-        Some(i) => Ok(i),
-        None => cfg.image.as_deref().ok_or_else(|| {
+        Some(i) => Ok(i.to_string()),
+        None => profile_image.map(str::to_string).ok_or_else(|| {
             anyhow::anyhow!("no image: pass -i <image> or set `image` in profile '{profile}'")
         }),
     }
 }
 
-/// The default box-name base: the image's declared name label
+/// The base for a hashed box name: the image's declared name label
 /// (`com.github.simon3z.steelbx.box.name`), else the image's name
-/// component without tag. When `-n` is absent, this is the prefix of the
-/// generated unique name (e.g. `pi-steelbx-a1b2c3d4`).
+/// component without tag (e.g. `pi-steelbx` → `pi-steelbx-a1b2c3d4`).
 fn base_box_name(image: &str, meta: &driver::ImageMeta) -> String {
-    meta.name.clone().unwrap_or_else(|| default_box_name(image))
+    meta.name
+        .clone()
+        .unwrap_or_else(|| config::default_box_name(image))
 }
 
 /// The runtime env names written onto the box at create (its
@@ -458,20 +507,6 @@ fn provision_env() -> anyhow::Result<()> {
         }
     }
     Ok(())
-}
-
-/// Default box name (when `-n` is absent): the image's name component
-/// without tag. `localhost/pi-steelbx:latest` → `pi-steelbx`;
-/// `registry.fedoraproject.org/fedora:42` → `fedora`.
-fn default_box_name(image: &str) -> String {
-    image
-        .rsplit('/')
-        .next()
-        .unwrap_or(image)
-        .split(':')
-        .next()
-        .unwrap_or(image)
-        .to_string()
 }
 
 /// The window-title escape for a box session (OSC 0, icon + window
@@ -710,22 +745,18 @@ mod tests {
 
     #[test]
     fn image_resolves_flag_over_profile_key() {
-        let cfg = SteelbxConfig {
-            image: Some("profile-image".into()),
-            ..Default::default()
-        };
         // The flag wins.
         assert_eq!(
-            resolve_image(Some("flag-image"), &cfg, "p").unwrap(),
+            resolve_image(Some("flag-image"), Some("profile-image"), "p").unwrap(),
             "flag-image"
         );
         // Absent flag: the profile's key.
-        assert_eq!(resolve_image(None, &cfg, "p").unwrap(), "profile-image");
-        // Neither: an error naming both ways out.
-        let err = format!(
-            "{}",
-            resolve_image(None, &SteelbxConfig::default(), "pi-agent").unwrap_err()
+        assert_eq!(
+            resolve_image(None, Some("profile-image"), "p").unwrap(),
+            "profile-image"
         );
+        // Neither: an error naming both ways out.
+        let err = format!("{}", resolve_image(None, None, "pi-agent").unwrap_err());
         assert!(err.contains("no image"));
         assert!(err.contains("-i"));
         assert!(err.contains("pi-agent"));
@@ -758,14 +789,14 @@ mod tests {
     #[test]
     fn default_box_name_is_the_image_name_component() {
         assert_eq!(
-            default_box_name("localhost/pi-steelbx:latest"),
+            config::default_box_name("localhost/pi-steelbx:latest"),
             "pi-steelbx"
         );
         assert_eq!(
-            default_box_name("registry.fedoraproject.org/fedora:42"),
+            config::default_box_name("registry.fedoraproject.org/fedora:42"),
             "fedora"
         );
-        assert_eq!(default_box_name("pi-steelbx"), "pi-steelbx");
+        assert_eq!(config::default_box_name("pi-steelbx"), "pi-steelbx");
     }
 
     /// The base for a generated name: the image's declared name label

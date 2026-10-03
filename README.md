@@ -92,7 +92,9 @@ Enter with: steelbx enter my-workload-1a2b3c4d
   profile (default: `default`) selects the policy; the image comes
   from the profile's `image` key (overridable with `-i`; auto-pulled
   if not local); the box
-  name is `-n` when given, otherwise a generated unique name built on
+  name is `-n` when given (pinned verbatim), otherwise the profile's
+  `name` key with a fresh random token appended (unless
+  `name_unique = false`), otherwise a generated unique name built on
   the image's declared base (its `com.github.simon3z.steelbx.box.name`
   label, else the image's name component without tag), e.g.
   `pi-steelbx-a1b2c3d4`; each `<path>` is bind-mounted at
@@ -100,8 +102,8 @@ Enter with: steelbx enter my-workload-1a2b3c4d
   started on its first `enter`
 
 - `run [-p <profile>] [-i <image>] [-n <name>] [-e NAME] <paths...>` —
-  a disposable box: creates the box (a generated unique name unless
-  `-n`), enters it, and force-removes it on the way out — like
+  a disposable box: creates the box (a unique name unless `-n` pins
+  one verbatim), enters it, and force-removes it on the way out — like
   `podman run --rm`. The profile is a flag (`-p`), so every positional
   is a mount dir; the exit code is the session's (130 if interrupted)
 
@@ -180,6 +182,16 @@ processes see the same values:
   Put files under `$STEELBX_DATA_DIR/shared` and they appear in every
   box created from that config.
 
+And one more, resolved per create: `STEELBX_BOX_NAME` — the box's
+name (the container name), decided before the profile is expanded,
+so it is the name the box is actually created as. Precedence: the
+`-n` flag (verbatim) > the profile's `name` key (a fresh random
+token appended unless `name_unique = false`) > a generated unique
+name. An expansion variable available to every profile value; the
+one exception is a generated name, which is not yet known when
+`[env]` and `image` expand (they decide it) — a reference there
+fails loudly, as any unset variable.
+
 Namespace sharing and identity are podman passthrough (shape-checked:
 single token, no spaces; podman interprets the value): `cgroupns`,
 `ipc`, `pid`, `userns`, `privileged`, `no_hosts`, `ulimits`. Together
@@ -254,6 +266,8 @@ image + config + CLI add layout and policy on top.
 |---|---|
 | `image` (profile) | The image this policy applies to; auto-pulled if not local. Its `WORKDIR` is the mount base (overridable below) — an image with no `WORKDIR` gets the default layout `/work`. |
 | `-i` (CLI) | Image override for one create (the profile's `image` is the default); auto-pulled if not local. |
+| `name` (config) | The declared box-name base; expanded against the caller env plus `env_files` (it is decided first, so it cannot reference `[env]` values) and shape-checked (a valid podman name; empty is absent). Unique by default: a fresh random token is appended unless `name_unique = false` (then pinned verbatim — a taken name is an error). Precedence: the `-n` flag (verbatim) > this key > a generated unique name from the image base. The effective name is the `STEELBX_BOX_NAME` expansion variable. |
+| `name_unique` (config) | Whether a declared `name` gets a fresh random token appended: unique by default; `false` pins the name verbatim. Absent = `true`; only applies when `name` is present. |
 | CLI paths | Each is canonicalized and bind-mounted at `<workdir>/<basename>`; there is no `dest` to declare. |
 | `workdir` (config) | The layout override (a container path, expanded): precedence over the image's `WORKDIR` and the `/work` default. Rendered as a create-time `--workdir` and the mount base; `enter`/`exec` run in the container's own working directory. Re-basing where the image's tools expect their files is the profile author's, reviewed, choice. |
 | `network` (config) | A podman network value; omitted = podman's default (no flag passed); `"none"` disables. |
@@ -266,16 +280,16 @@ image + config + CLI add layout and policy on top.
 | `[profile]` (CLI) | Selects a `profiles/<name>.conf` — a complete `containers.conf` (replace semantics, no merging). Defaults to `default`; optional when `-i` provides the image. |
 | caps | Not configurable: the baseline is podman's default posture. |
 
-Unknown keys, unparseable config, and invalid `workdir`/`env`/
-`runtime_env`/`extra_hosts`/`security_opts`/`mounts`/`init` shapes
-are rejected by validation, before anything runs.
+Unknown keys, unparseable config, and invalid `name`/`workdir`/
+`env`/`runtime_env`/`extra_hosts`/`security_opts`/`mounts`/`init`
+shapes are rejected by validation, before anything runs.
 
 ## Commands
 
 | Command | Behavior |
 |---|---|
-| `steelbx create [-p <profile>] [-i <image>] [-n <box-name>] <paths...>` | Create the box (created state; starts on first `enter`). Profile defaults to `default`. Without `-n`, a unique name is generated (base + 8 hex). Tab-completion suggests profiles, marker-labeled images for `-i`, existing box names for `-n`, and directories for the paths |
-| `steelbx run [-p <profile>] [-i <image>] [-n <name>] [-e NAME] <paths...>` | Disposable box: create → enter → auto-rm, like `podman run --rm`. The profile is a flag (`-p`) so every positional is a mount dir; the name is `-n` or a generated unique name; the box is force-removed on exit and the exit code is the session's (130 if interrupted). TTY required |
+| `steelbx create [-p <profile>] [-i <image>] [-n <box-name>] <paths...>` | Create the box (created state; starts on first `enter`). Profile defaults to `default`. `-n` pins the name verbatim; without it, the name is unique: the profile's `name` key (or the image base) + a fresh 8-hex token (`name_unique = false` pins verbatim instead). Tab-completion suggests profiles, marker-labeled images for `-i`, existing box names for `-n`, and directories for the paths |
+| `steelbx run [-p <profile>] [-i <image>] [-n <name>] [-e NAME] <paths...>` | Disposable box: create → enter → auto-rm, like `podman run --rm`. The profile is a flag (`-p`) so every positional is a mount dir; the name is `-n` (verbatim) or a unique name (the profile's `name` key, or the image base, + a fresh token); the box is force-removed on exit and the exit code is the session's (130 if interrupted). TTY required |
 | `steelbx enter <box-name> [-e NAME]` | Start if needed, interactive shell (TTY required); `-e NAME` exposes a caller env var for the session (the box's declared runtime env is always injected) |
 | `steelbx exec <box-name> [-e NAME] cmd...` | One-shot command; `-e NAME` as above |
 | `steelbx rm <box-name>` | Remove; silent on success, `--force` kills running |
@@ -317,8 +331,9 @@ conventionally `true`, never read; the env list is read):
   steelbx sets it at create; its absence keeps a container out of
   `ps`/`enter`/`rm`).
 - `com.github.simon3z.steelbx.box.name` — on an image, the declared base
-  name for a generated box name (`create` uses it as the prefix when
-  `-n` is absent); on a container, a mirror of the name (the
+  name for a unique box name (`create` uses it as the prefix when no
+  name is declared — the profile's `name` key, if present, is the
+  base instead); on a container, a mirror of the name (the
   distribution unit carries its identity). Never read for layout or
   policy.
 - `com.github.simon3z.steelbx.box.env` — on an image, the declared runtime env

@@ -164,6 +164,92 @@ fn expand_init(
     Ok(())
 }
 
+/// The pre-pass of the load pipeline: expands what the caller needs
+/// before the full pass, in the order that decides the box name first.
+/// The final name is decided before `[env]` and `image` expand: the
+/// CLI `-n` flag (verbatim), else the profile's `name` key (expanded
+/// against the caller env plus `env_files`, empty is absent,
+/// shape-checked) with a fresh random token appended (unique by
+/// default; `name_unique = false` pins it verbatim). When a name is
+/// known, it is `STEELBX_BOX_NAME` in the context for `[env]` and
+/// `image` — both may reference it. When no name is declared (a
+/// generated name), `STEELBX_BOX_NAME` is not yet known here — a
+/// reference in `[env]` or `image` fails loudly; every other value
+/// gets the generated name in the full pass. The inline `[env]` values
+/// expand against the caller env plus `env_files` plus the known name
+/// (they do not reference each other); `image` expands against that
+/// plus the expanded `[env]` — so `image = "$IMG"` may refer to a
+/// variable declared in `env_files` or `[env]`. The profile's `name`
+/// key expands against the caller env plus `env_files` (it is decided
+/// first, so it cannot reference `[env]` values). The expanded values
+/// are stored in their slots; the full pass (`expand_with_env`) does
+/// not re-expand them. Returns (image, declared name, final name).
+fn pre_expand_with_env(
+    cfg: &mut SteelbxConfig,
+    caller: &HashMap<String, String>,
+    name_flag: Option<&str>,
+) -> Result<(Option<String>, Option<String>, Option<String>)> {
+    let file_env = load_env_files_env(&cfg.env_files, caller)?;
+    let mut ctx = caller.clone();
+    merge_ctx(&mut ctx, &file_env);
+    // The name, decided first: the CLI `-n` flag (verbatim; it wins —
+    // the profile key is replaced by it), else the profile's `name`
+    // key. A declared name is unique by default: a fresh random token
+    // is appended unless `name_unique = false`.
+    let declared = match name_flag {
+        Some(n) => Some(n.to_string()),
+        None => expand_declared_name(cfg, &ctx)?,
+    };
+    let final_name = declared.as_ref().map(|d| {
+        if name_flag.is_some() || !cfg.name_unique() {
+            d.clone()
+        } else {
+            crate::driver::unique_name(d)
+        }
+    });
+    // When known, the final name is STEELBX_BOX_NAME for [env] and
+    // image (it is the name the box is actually created as).
+    if let Some(n) = &final_name {
+        ctx.insert("STEELBX_BOX_NAME".to_string(), n.clone());
+    }
+    // [env] values, against caller+files+name (they do not reference
+    // each other).
+    for (k, v) in cfg.env.iter_mut() {
+        *v = expand_env(v, &ctx, &format!("env.{k}"))?;
+    }
+    // Now the inline [env] feeds every other value too.
+    for (k, v) in cfg.env.iter() {
+        ctx.insert(k.clone(), v.clone());
+    }
+    // The image key, against the full context (name + [env]).
+    let image = cfg
+        .image
+        .take()
+        .map(|v| expand_env(&v, &ctx, "image"))
+        .transpose()?;
+    cfg.image = image.clone();
+    Ok((image, declared, final_name))
+}
+
+/// Expand the profile's `name` key (caller+files; empty is absent;
+/// shape-checked — a valid podman name, before any token is added).
+fn expand_declared_name(
+    cfg: &mut SteelbxConfig,
+    ctx: &HashMap<String, String>,
+) -> Result<Option<String>> {
+    let Some(v) = cfg.name.take() else {
+        return Ok(None);
+    };
+    let v = expand_env(&v, ctx, "name")?.trim().to_string();
+    if v.is_empty() {
+        return Ok(None);
+    }
+    if !crate::driver::is_valid_name(&v) {
+        anyhow::bail!("name: {v:?} is not a valid box name");
+    }
+    Ok(Some(v))
+}
+
 /// Expand one caller-env string value in place.
 fn expand_slot(
     slot: &mut Option<String>,
@@ -242,38 +328,40 @@ fn parse_env_file(content: &str, path: &str, out: &mut IndexMap<String, String>)
     Ok(())
 }
 
-/// Expand caller-env references in every string value: the `image` and
-/// `network` strings, each `extra_hosts` element, each `[env]` value,
+/// The full pass of the load pipeline: expands every string value not
+/// yet expanded — the `network` string, each `extra_hosts` element,
 /// each `security_opts` element, each `mounts` spec, and the
 /// namespace/identity values (`cgroupns`, `ipc`, `pid`, `userns`, `user`,
 /// `ulimits`). Keys never expand (an env key is a name, not a value).
-/// Two phases: the `[env]` values expand against the caller env plus
-/// `env_files` (they do not reference each other); the rest expand
-/// against that *plus* the (expanded) `[env]`, profile values winning —
-/// so `image = "$IMG"` may refer to a variable declared in `env_files`
-/// or `[env]`. Caveat: values that are *host* paths (`mounts` sources,
+/// The `[env]`, `image`, and `name` slots were already expanded by the
+/// pre-pass (`pre_expand_with_env`) and are skipped. `box_name` is
+/// always defined (the CLI `-n` override, the profile's `name` key, or
+/// the generated unique name): it is injected as `STEELBX_BOX_NAME`
+/// before the `[env]` values feed the context, so every value —
+/// including `[env]` — may reference it, and it is stored in
+/// `cfg.name`. Caveat: values that are *host* paths (`mounts` sources,
 /// `init` cp sources) must refer to caller/steelbx variables, not
 /// container-only `[env]` names.
-fn expand_with(cfg: &mut SteelbxConfig, caller: &HashMap<String, String>) -> Result<()> {
+fn expand_with_env(
+    cfg: &mut SteelbxConfig,
+    caller: &HashMap<String, String>,
+    box_name: &str,
+) -> Result<()> {
     // The env_files variables: an expansion source only (not the
     // container env — that is the inline [env]). Later files override
     // earlier; their values expand against the caller env alone.
     let file_env = load_env_files_env(&cfg.env_files, caller)?;
-    // The expansion context grows: the caller env, plus the env_files
-    // variables, plus (after phase A) the inline [env].
+    // The expansion context: the caller env, plus the env_files
+    // variables, plus STEELBX_BOX_NAME, plus (the already-expanded)
+    // inline [env].
     let mut ctx = caller.clone();
     merge_ctx(&mut ctx, &file_env);
-    // Phase A: the inline [env] values, against caller+files (they do
-    // not reference each other).
-    for (k, v) in cfg.env.iter_mut() {
-        *v = expand_env(v, &ctx, &format!("env.{k}"))?;
-    }
-    // Now the inline [env] feeds every other value too.
+    ctx.insert("STEELBX_BOX_NAME".to_string(), box_name.to_string());
     for (k, v) in cfg.env.iter() {
         ctx.insert(k.clone(), v.clone());
     }
+    cfg.name = Some(box_name.to_string());
     expand_slot(&mut cfg.network, &ctx, "network")?;
-    expand_slot(&mut cfg.image, &ctx, "image")?;
     expand_slot(&mut cfg.cgroupns, &ctx, "cgroupns")?;
     expand_slot(&mut cfg.ipc, &ctx, "ipc")?;
     expand_slot(&mut cfg.pid, &ctx, "pid")?;
@@ -337,10 +425,39 @@ fn validate_init(init: &mut Option<crate::driver::Init>) -> Result<()> {
     Ok(())
 }
 
+/// Default box name (when no name is declared): the image's name
+/// component without tag. `localhost/pi-steelbx:latest` → `pi-steelbx`;
+/// `registry.fedoraproject.org/fedora:42` → `fedora`.
+pub fn default_box_name(image: &str) -> String {
+    image
+        .rsplit('/')
+        .next()
+        .unwrap_or(image)
+        .split(':')
+        .next()
+        .unwrap_or(image)
+        .to_string()
+}
+
 /// Steelbx's policy defaults (the policy layer: CLI > config > image
 /// labels).
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct SteelbxConfig {
+    /// The box name (container name) — always defined after load: the
+    /// CLI `-n` override (verbatim), else the profile's `name` key (a
+    /// fresh random token appended unless `name_unique = false`), else
+    /// a generated unique name from the image base. Available to every
+    /// profile value as `STEELBX_BOX_NAME`; shape-checked (a valid
+    /// podman name).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Whether a declared `name` gets a fresh random token appended:
+    /// unique by default; `false` pins the name verbatim (a taken name
+    /// is then an error). Absent = `true`. Only applies when `name` is
+    /// present (without `name`, the name is generated from the image
+    /// base regardless).
+    #[serde(default)]
+    pub name_unique: Option<bool>,
     /// The image name (auto-pulled if not local); a profile sets it so
     /// `steelbx create <profile>` is self-contained. CLI `-i` overrides it; absent = `-i` is
     /// required. Expanded like every other string value.
@@ -489,11 +606,60 @@ impl SteelbxConfig {
         Self::load_profile_in(name, &Self::profile_dirs(&home))
     }
 
+    /// Parse a named policy profile (the user dir first, then the
+    /// shipped dir) — TOML only: no expansion, no validation.
+    pub fn parse_profile(name: &str) -> Result<Self> {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        Self::parse_from(&Self::find_profile_path(name, &Self::profile_dirs(&home))?)
+    }
+
+    /// The pre-pass of the load pipeline (see `pre_expand_with_env`),
+    /// against the process env: returns (image, declared name, final
+    /// name).
+    pub fn pre_expand(
+        cfg: &mut Self,
+        name_flag: Option<&str>,
+    ) -> Result<(Option<String>, Option<String>, Option<String>)> {
+        let caller: HashMap<String, String> = std::env::vars().collect();
+        pre_expand_with_env(cfg, &caller, name_flag)
+    }
+
+    /// The full pass of the load pipeline (see `expand_with_env`),
+    /// against the process env: warn, expand, validate the expanded
+    /// shape. `box_name` is always defined (the effective name: the
+    /// `-n` flag, the profile's `name` key, or a generated unique
+    /// name) and becomes `STEELBX_BOX_NAME`.
+    pub fn finish_expand(cfg: &mut Self, box_name: &str) -> Result<()> {
+        // Warn before expansion (mounts still have $ references).
+        Self::warn_runtime_env_in_mounts(cfg);
+        let caller: HashMap<String, String> = std::env::vars().collect();
+        expand_with_env(cfg, &caller, box_name)?;
+        Self::validate_config(cfg)?;
+        Ok(())
+    }
+
     fn profile_dirs(home: &Path) -> [PathBuf; 2] {
         [profiles_dir(home), system_profiles_dir()]
     }
 
+    /// `name_unique`: absent = the default (`true`).
+    pub fn name_unique(&self) -> bool {
+        self.name_unique.unwrap_or(true)
+    }
+
+    /// Load a named profile from the given dirs (the test-facing
+    /// variant of `parse_profile` + `finish_load`).
     fn load_profile_in(name: &str, dirs: &[PathBuf]) -> Result<Self> {
+        let mut cfg = Self::parse_from(&Self::find_profile_path(name, dirs)?)?;
+        Self::finish_load(&mut cfg)?;
+        Ok(cfg)
+    }
+
+    /// Find a named profile file: the user dir first, then the shipped
+    /// dir — a user profile of the same name overrides the shipped one.
+    fn find_profile_path(name: &str, dirs: &[PathBuf]) -> Result<PathBuf> {
         let file = Path::new(name);
         if file.file_name().map(Path::new) != Some(file) {
             bail!("invalid profile name: {name:?} — no path separators, no '..'");
@@ -515,23 +681,44 @@ impl SteelbxConfig {
                 }
             );
         };
-        Self::load_from(&path)
+        Ok(path)
     }
 
-    pub fn load_from(path: &Path) -> Result<Self> {
+    /// Read and parse a config file (TOML only — no expansion, no
+    /// validation).
+    fn parse_from(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
         }
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("reading steelbx config {}", path.display()))?;
-        let mut cfg: SteelbxConfig = toml::from_str(&raw)
-            .with_context(|| format!("parsing steelbx config {}", path.display()))?;
+        toml::from_str(&raw).with_context(|| format!("parsing steelbx config {}", path.display()))
+    }
+
+    /// The load pipeline after parsing: warn, pre-expand, decide the
+    /// name (the profile's `name` key, else a generated unique name from
+    /// the image's name component — no label lookup here), expand the
+    /// rest, validate. `STEELBX_BOX_NAME` is always defined.
+    fn finish_load(cfg: &mut Self) -> Result<()> {
         // Warn before expansion (mounts still have $ references).
-        Self::warn_runtime_env_in_mounts(&cfg);
-        // Expand against the process env, then validate the expanded shape.
+        Self::warn_runtime_env_in_mounts(cfg);
         let caller: HashMap<String, String> = std::env::vars().collect();
-        expand_with(&mut cfg, &caller)?;
-        Self::validate_config(&mut cfg)?;
+        let (image, _declared, final_name) = pre_expand_with_env(cfg, &caller, None)?;
+        // The box name — always defined: the final name (the declared
+        // `name`, a fresh random token appended unless
+        // `name_unique = false`), else a generated unique name from
+        // the image's name component.
+        let name = final_name.unwrap_or_else(|| {
+            crate::driver::unique_name(&default_box_name(image.as_deref().unwrap_or_default()))
+        });
+        expand_with_env(cfg, &caller, &name)?;
+        Self::validate_config(cfg)?;
+        Ok(())
+    }
+
+    pub fn load_from(path: &Path) -> Result<Self> {
+        let mut cfg = Self::parse_from(path)?;
+        Self::finish_load(&mut cfg)?;
         Ok(cfg)
     }
 
@@ -624,6 +811,14 @@ impl SteelbxConfig {
         validate_mount_specs(&cfg.mounts)?;
         validate_ns_and_ulimits(cfg)?;
         validate_workdir(&cfg.workdir)?;
+        // `name`: the effective box name (always set after load) — a
+        // valid podman name (the driver re-checks at create; the
+        // profile-level check names the key).
+        if let Some(n) = &cfg.name {
+            if !crate::driver::is_valid_name(n) {
+                anyhow::bail!("name: {n:?} is not a valid box name");
+            }
+        }
         validate_init(&mut cfg.init)?;
         validate_entry(&cfg.entry)?;
         // `network = ""` means "don't pass a flag", same as omitting it;
@@ -924,21 +1119,21 @@ mod tests {
             "/examples/pi-agent.conf"
         ))
         .unwrap();
-        let mut cfg: SteelbxConfig = toml::from_str(&raw).unwrap();
-        let env = [
-            ("USER", "simon"),
-            ("HOME", "/home/simon"),
-            ("XDG_RUNTIME_DIR", "/run/user/1000"),
-            ("WAYLAND_DISPLAY", "wayland-0"),
-            ("COLORTERM", "truecolor"),
-            ("LANG", "C.UTF-8"),
-            ("TERM", "xterm-256color"),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
-        expand_with(&mut cfg, &env).unwrap();
-        SteelbxConfig::validate_config(&mut cfg).unwrap();
+        expand_against(
+            &raw,
+            &[
+                ("USER", "simon"),
+                ("HOME", "/home/simon"),
+                ("XDG_RUNTIME_DIR", "/run/user/1000"),
+                ("WAYLAND_DISPLAY", "wayland-0"),
+                ("COLORTERM", "truecolor"),
+                ("LANG", "C.UTF-8"),
+                ("TERM", "xterm-256color"),
+            ],
+            None,
+            "base",
+        )
+        .unwrap();
     }
 
     #[test]
@@ -948,21 +1143,21 @@ mod tests {
             "/examples/toolbox.conf"
         ))
         .unwrap();
-        let mut cfg: SteelbxConfig = toml::from_str(&raw).unwrap();
         // SHELL is deliberately unset: the profile's `${SHELL:-/bin/bash}`
         // must fall back. VERSION_ID is supplied in case the host's
         // /etc/os-release lacks it (the example's env_file).
-        let env = [
-            ("USER", "simon"),
-            ("HOME", "/home/simon"),
-            ("XDG_RUNTIME_DIR", "/run/user/1000"),
-            ("VERSION_ID", "43"),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
-        expand_with(&mut cfg, &env).unwrap();
-        SteelbxConfig::validate_config(&mut cfg).unwrap();
+        expand_against(
+            &raw,
+            &[
+                ("USER", "simon"),
+                ("HOME", "/home/simon"),
+                ("XDG_RUNTIME_DIR", "/run/user/1000"),
+                ("VERSION_ID", "43"),
+            ],
+            None,
+            "base",
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1101,15 +1296,28 @@ ulimits = ["host"]
         assert!(SteelbxConfig::load_from(&p2).is_err());
     }
 
-    // Portable (fixed caller env, the `load_from` pipeline minus the
-    // process env): the env-visibility rules are pinned here.
-    fn expand_against(raw: &str, caller: &[(&str, &str)]) -> Result<SteelbxConfig> {
-        let mut cfg: SteelbxConfig = toml::from_str(raw).unwrap();
+    // Portable (fixed caller env, the create pipeline minus the process
+    // env and the podman inspect): the env-visibility rules are pinned
+    // here. `name_flag` is the CLI `-n` override; `base` is the name base
+    // for a generated name (used only when no name is declared — the
+    // name is then always defined.
+    fn expand_against(
+        raw: &str,
+        caller: &[(&str, &str)],
+        name_flag: Option<&str>,
+        base: &str,
+    ) -> Result<SteelbxConfig> {
         let env: HashMap<String, String> = caller
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        expand_with(&mut cfg, &env)?;
+        let mut cfg: SteelbxConfig = toml::from_str(raw).unwrap();
+        let (_image, _declared, final_name) = pre_expand_with_env(&mut cfg, &env, name_flag)?;
+        // The name (as in the create pipeline): the final name (the
+        // flag, or the declared name — a fresh token appended unless
+        // `name_unique = false`), else a generated name on `base`.
+        let name = final_name.unwrap_or_else(|| crate::driver::unique_name(base));
+        expand_with_env(&mut cfg, &env, &name)?;
         SteelbxConfig::validate_config(&mut cfg)?;
         Ok(cfg)
     }
@@ -1132,8 +1340,11 @@ NET = "bridge"
 E = ""
 "#,
             &[("IMG", "caller-img"), ("E", "caller-e")],
+            None,
+            "base",
         )
         .unwrap();
+
         assert_eq!(cfg.image.as_deref(), Some("img-1"));
         assert_eq!(cfg.network.as_deref(), Some("bridge"));
         assert_eq!(cfg.workdir.as_deref(), Some("/work/code"));
@@ -1147,7 +1358,9 @@ E = ""
 A = "$B"
 B = "b"
 "#,
-            &[]
+            &[],
+            None,
+            "base",
         )
         .is_err());
     }
@@ -1217,6 +1430,165 @@ security_opts = ["label=dis$$able"]
         .unwrap();
         let cfg = SteelbxConfig::load_from(&profile).unwrap();
         assert_eq!(cfg.image.as_deref(), Some("my-image"));
+    }
+
+    /// `name` + `name_unique = false`: the declared name is pinned
+    /// verbatim — expanded once, shape-checked, and available to every
+    /// other value (including `[env]`) as `STEELBX_BOX_NAME`.
+    #[test]
+    fn pinned_name_is_the_steelbx_box_name_variable() {
+        let cfg = expand_against(
+            r#"
+name = "declared-box"
+name_unique = false
+image = "img-${STEELBX_BOX_NAME}"
+mounts = ["type=bind,source=/x/${STEELBX_BOX_NAME},destination=/data"]
+
+[env]
+BOX = "$STEELBX_BOX_NAME"
+"#,
+            &[],
+            None,
+            "base",
+        )
+        .unwrap();
+        assert_eq!(cfg.name.as_deref(), Some("declared-box"));
+        assert_eq!(cfg.image.as_deref(), Some("img-declared-box"));
+        assert_eq!(
+            cfg.mounts[0],
+            "type=bind,source=/x/declared-box,destination=/data"
+        );
+        assert_eq!(cfg.env.get("BOX").map(String::as_str), Some("declared-box"));
+    }
+
+    /// A declared `name` without `name_unique = false`: unique by
+    /// default — a fresh random token is appended, and that is
+    /// `STEELBX_BOX_NAME`.
+    #[test]
+    fn declared_name_is_unique_by_default() {
+        let cfg = expand_against(
+            r#"
+name = "declared-box"
+image = "img-${STEELBX_BOX_NAME}"
+"#,
+            &[],
+            None,
+            "base",
+        )
+        .unwrap();
+        // The name is the declared base plus an 8-hex token.
+        let name = cfg.name.as_deref().unwrap();
+        assert!(name.starts_with("declared-box-"), "name: {name}");
+        assert_eq!(name.len(), "declared-box-".len() + 8);
+        assert_eq!(cfg.image.as_deref(), Some(format!("img-{name}").as_str()));
+    }
+
+    /// The CLI `-n` override wins over the profile's `name` key: the
+    /// effective name (what the box is actually called) is the
+    /// `STEELBX_BOX_NAME` value everywhere, and is stored in `name`.
+    #[test]
+    fn cli_name_override_wins_over_the_profile_name() {
+        let cfg = expand_against(
+            r#"
+name = "declared-box"
+image = "img-${STEELBX_BOX_NAME}"
+"#,
+            &[],
+            Some("flag-box"),
+            "base",
+        )
+        .unwrap();
+        assert_eq!(cfg.name.as_deref(), Some("flag-box"));
+        assert_eq!(cfg.image.as_deref(), Some("img-flag-box"));
+    }
+
+    /// No declared name: a generated unique name is decided before the
+    /// full pass and is `STEELBX_BOX_NAME` for every value that expands
+    /// after it. (`[env]` and `image` expand first, to decide it, so
+    /// they cannot reference a generated name — they fail loudly; a
+    /// declared name is available to them too.)
+    #[test]
+    fn generated_name_is_the_steelbx_box_name_variable() {
+        let cfg = expand_against(
+            r#"
+network = "net-${STEELBX_BOX_NAME}"
+"#,
+            &[],
+            None,
+            "gen-base",
+        )
+        .unwrap();
+        // The generated name is the base plus an 8-hex token.
+        let name = cfg.name.as_deref().unwrap();
+        assert!(name.starts_with("gen-base-"), "name: {name}");
+        assert_eq!(name.len(), "gen-base-".len() + 8);
+        assert_eq!(cfg.network.as_deref(), Some(format!("net-{name}").as_str()));
+        // A generated name is not known when `image`/`[env]` expand.
+        assert!(expand_against(
+            r#"
+image = "img-${STEELBX_BOX_NAME}"
+"#,
+            &[],
+            None,
+            "gen-base",
+        )
+        .is_err());
+    }
+
+    /// The profile `name` is expanded once and shape-checked: an invalid
+    /// podman name is an error naming the key; empty is absent (a
+    /// generated name is used instead).
+    #[test]
+    fn profile_name_is_shape_checked() {
+        // Invalid: a space is not a valid podman name.
+        assert!(expand_against("name = \"bad name\"\n", &[], None, "base").is_err());
+        // Invalid: a literal `$` (from a `$$` escape) is not a valid
+        // podman name — the value is expanded exactly once (not
+        // re-scanned as a reference) and then shape-checked.
+        assert!(expand_against("name = \"a$$b\"\n", &[], None, "base").is_err());
+        // Empty is absent (like `network`/`image`): a generated name is
+        // used.
+        let cfg = expand_against("name = \"  \"\n", &[], None, "gen").unwrap();
+        assert!(cfg.name.as_deref().unwrap().starts_with("gen-"));
+    }
+
+    /// The create pipeline (`parse_profile` + `pre_expand` +
+    /// `finish_expand`): the flag name is the declared name — the
+    /// profile values see it as `STEELBX_BOX_NAME`, and the returned
+    /// config carries it in `name`. Without the flag, the profile's own
+    /// `name` key wins.
+    #[test]
+    fn create_pipeline_pins_the_declared_name() {
+        let t = tempfile::tempdir().unwrap();
+        let profiles = t.path().join("profiles");
+        std::fs::create_dir_all(&profiles).unwrap();
+        std::fs::write(
+            profiles.join("p.conf"),
+            "image = \"img-${STEELBX_BOX_NAME}\"\n",
+        )
+        .unwrap();
+        let dirs = std::slice::from_ref(&profiles);
+        let mut cfg =
+            SteelbxConfig::parse_from(&SteelbxConfig::find_profile_path("p", dirs).unwrap())
+                .unwrap();
+        let (_image, _declared, final_name) =
+            SteelbxConfig::pre_expand(&mut cfg, Some("from-flag")).unwrap();
+        SteelbxConfig::finish_expand(&mut cfg, final_name.as_deref().unwrap()).unwrap();
+        assert_eq!(cfg.name.as_deref(), Some("from-flag"));
+        assert_eq!(cfg.image.as_deref(), Some("img-from-flag"));
+        // No flag: the profile's own `name` key is the declared name.
+        std::fs::write(
+            profiles.join("q.conf"),
+            "name = \"from-profile\"\nname_unique = false\nimage = \"img-${STEELBX_BOX_NAME}\"\n",
+        )
+        .unwrap();
+        let mut cfg =
+            SteelbxConfig::parse_from(&SteelbxConfig::find_profile_path("q", dirs).unwrap())
+                .unwrap();
+        let (_image, _declared, final_name) = SteelbxConfig::pre_expand(&mut cfg, None).unwrap();
+        SteelbxConfig::finish_expand(&mut cfg, final_name.as_deref().unwrap()).unwrap();
+        assert_eq!(cfg.name.as_deref(), Some("from-profile"));
+        assert_eq!(cfg.image.as_deref(), Some("img-from-profile"));
     }
 
     /// `runtime_env`: names only — not expanded, shape-checked.
