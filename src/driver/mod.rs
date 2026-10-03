@@ -84,6 +84,13 @@ pub struct BoxInfo {
     /// The declared runtime env names (the `box.env` label written at
     /// create); enter/exec inject them as bare `-e NAME`.
     pub env: Vec<String>,
+    /// The `box.volumes` label (the named volumes the box was created
+    /// with under `delete_volumes`); `rm` removes them by default.
+    pub volumes: Vec<String>,
+    /// The names of the box's `type=volume` mounts (podman inspect
+    /// `Mounts`) — the `rm --volumes` target set: every volume mount
+    /// the box carried, labeled or not.
+    pub volume_mounts: Vec<String>,
 }
 
 /// The box marker — presence is the check; the value is
@@ -114,6 +121,13 @@ pub const BOX_NAME_LABEL: &str = "com.github.simon3z.steelbx.box.name";
 /// key — so the list is comma-separated (env names cannot contain
 /// commas).
 pub const BOX_ENV_LABEL: &str = "com.github.simon3z.steelbx.box.env";
+/// The box volumes label: one value holding a comma-separated list of
+/// the NAMED volumes the box's `mounts` declare (`type=volume,
+/// source=<name>`), written at create only when the profile sets
+/// `delete_volumes`. Presence is the policy: `rm` reads it back and
+/// removes those volumes after the container is gone — the profile is
+/// never reloaded. Anonymous (unnamed) volume mounts are not tracked.
+pub const BOX_VOLUMES_LABEL: &str = "com.github.simon3z.steelbx.box.volumes";
 
 /// One `steelbx ps` row: a steelbx box (marker-labelled) with the
 /// fields the listing shows — name, state, image, and the human age
@@ -267,6 +281,8 @@ impl Podman {
             state,
             r#box: parse::box_marker_from_inspect(&v),
             env: parse::env_names_from_inspect(&v),
+            volumes: parse::box_volumes_from_inspect(&v),
+            volume_mounts: parse::volume_mount_names_from_inspect(&v),
         }))
     }
 
@@ -380,6 +396,26 @@ impl Podman {
     /// escalation. Force: kill (SIGKILL, no stop grace — `rm -f`'s
     /// SIGTERM grace was a live-measured 10.4s) then rm. Plain:
     /// rm; a failed graceful rm is retried once with force (wedged box).
+    /// Remove the named volumes a box used, AFTER the container is
+    /// gone: podman refuses a volume another live box still mounts
+    /// (in use) — that volume survives and is named in the error.
+    /// A volume that is already absent is a value (nothing to
+    /// remove), not an error. `rm` calls this with the box's
+    /// `box.volumes` label (the `delete_volumes` policy) or, with
+    /// `--volumes`, its full `type=volume` mount set.
+    pub fn remove_volumes(&self, volumes: &[String]) -> Result<()> {
+        for v in volumes {
+            if let Err(e) = self.run(&["volume".into(), "rm".into(), v.clone()]) {
+                let msg = format!("{e}");
+                if msg.contains("not found") || msg.contains("no such") {
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
     pub fn remove_container(&self, name: &str, force: bool) -> Result<()> {
         if force {
             let _ = self.run(&["kill".into(), name.into()]);

@@ -85,6 +85,55 @@ pub(crate) fn env_names_from_label(label: &str) -> Vec<String> {
         .collect()
 }
 
+/// The `box.volumes` label: one value holding a comma-separated list
+/// of the NAMED volumes the box's `mounts` declare (written at create
+/// only when the profile sets `delete_volumes`). Absent, empty, or no
+/// names ⇒ none. Volume names are podman names (validated by podman
+/// at create); the split is unambiguous (a comma cannot be part of a
+/// name).
+pub(crate) fn box_volumes_from_inspect(v: &serde_json::Value) -> Vec<String> {
+    let label = v
+        .get(0)
+        .and_then(|c| c.get("Config"))
+        .and_then(|cfg| cfg.get("Labels"))
+        .and_then(|l| l.get("com.github.simon3z.steelbx.box.volumes"))
+        .and_then(|e| e.as_str())
+        .unwrap_or("");
+    label
+        .split(',')
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The box's `type=volume` mount names: podman's inspect JSON holds
+/// the mounts at `[0].Mounts` — an array of `{Source, Destination,
+/// RW, Type}`. Only `Type == "volume"` rows are volume mounts (a bind
+/// mount's `Source` is a host path, not a volume name); `Source` is
+/// the volume name (named or podman-generated). Deduped, in
+/// declaration order.
+pub(crate) fn volume_mount_names_from_inspect(v: &serde_json::Value) -> Vec<String> {
+    let mounts = v
+        .get(0)
+        .and_then(|c| c.get("Mounts"))
+        .and_then(|m| m.as_array());
+    let Some(mounts) = mounts else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for m in mounts {
+        if m.get("Type").and_then(|t| t.as_str()) == Some("volume") {
+            if let Some(s) = m.get("Source").and_then(|s| s.as_str()) {
+                if !s.is_empty() && !out.iter().any(|x| x == s) {
+                    out.push(s.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Pinned parse: podman's `ps` JSON holds the name in `Names`
 /// (an array, docker-style) — NOT a `Name` string. Defensive on the
 /// way in, so a format change fails a unit test (fixture), not a
@@ -267,6 +316,45 @@ mod tests {
     // docker-style), NOT a `Name` string; the marker is presence.
     // Pinned: the `box.env` label — one value, comma-separated names,
     // trimmed, invalid names dropped, absent ⇒ none.
+    // Pinned: the `box.volumes` label — one value, comma-separated
+    // names, trimmed, empty elements dropped, absent ⇒ none.
+    #[test]
+    fn box_volumes_label_is_pinned() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"[{"Config":{"Labels":{"com.github.simon3z.steelbx.box.volumes":"a-vol, b-vol ,,"}}}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            box_volumes_from_inspect(&v),
+            vec!["a-vol".to_string(), "b-vol".to_string()]
+        );
+        // Absent and empty are both "none".
+        let v: serde_json::Value = serde_json::from_str(r#"[{"Config":{"Labels":{}}}]"#).unwrap();
+        assert_eq!(box_volumes_from_inspect(&v), Vec::<String>::new());
+        let v: serde_json::Value = serde_json::from_str(
+            r#"[{"Config":{"Labels":{"com.github.simon3z.steelbx.box.volumes":""}}}]"#,
+        )
+        .unwrap();
+        assert_eq!(box_volumes_from_inspect(&v), Vec::<String>::new());
+    }
+
+    // Pinned: `podman inspect` `Mounts` — only `Type == "volume"` rows
+    // yield volume names (`Source`); a bind mount's host-path `Source`
+    // never leaks in; duplicates collapse; absent `Mounts` ⇒ none.
+    #[test]
+    fn volume_mount_names_shape_is_pinned() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"[{"Mounts":[{"Source":"vol-a","Destination":"/data","Type":"volume"},{"Source":"/host/path","Destination":"/work/proj","Type":"bind"},{"Source":"vol-a","Destination":"/data2","Type":"volume"}]}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            volume_mount_names_from_inspect(&v),
+            vec!["vol-a".to_string()]
+        );
+        let v: serde_json::Value = serde_json::from_str(r#"[{"Config":{}}]"#).unwrap();
+        assert_eq!(volume_mount_names_from_inspect(&v), Vec::<String>::new());
+    }
+
     #[test]
     fn env_names_label_is_pinned() {
         let v: serde_json::Value = serde_json::from_str(

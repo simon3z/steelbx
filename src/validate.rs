@@ -71,6 +71,48 @@ pub(crate) fn validate_mount_specs(specs: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Whether a podman `--mount` spec (a comma-separated `key=value`
+/// list) declares a volume mount (`type=volume`).
+pub fn is_volume_mount_spec(spec: &str) -> bool {
+    spec.split(',').any(|p| {
+        p.split_once('=')
+            .is_some_and(|(k, v)| k == "type" && v == "volume")
+    })
+}
+
+/// The volume name a podman `--mount` spec declares: the `source`
+/// (or `name`) key, only for `type=volume` specs. `None` for
+/// non-volume specs and for anonymous (unnamed) volume mounts.
+pub fn volume_name_from_mount_spec(spec: &str) -> Option<String> {
+    if !is_volume_mount_spec(spec) {
+        return None;
+    }
+    spec.split(',').find_map(|part| {
+        part.split_once('=').and_then(|(k, v)| {
+            if (k == "source" || k == "name") && !v.is_empty() {
+                Some(v.to_string())
+            } else {
+                None
+            }
+        })
+    })
+}
+
+/// The named volumes across the `mounts` specs, in declaration order,
+/// deduped. Anonymous (unnamed) volume mounts have no name and
+/// contribute nothing.
+pub fn volume_names_from_specs(specs: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for s in specs {
+        if let Some(n) = volume_name_from_mount_spec(s) {
+            if !out.iter().any(|x| x == &n) {
+                out.push(n);
+            }
+        }
+    }
+    out
+}
+
 /// Namespace/identity values (`cgroupns`, `ipc`, `pid`, `userns`, `user`)
 /// and `ulimits` elements: a single token, no spaces (hostile
 /// input); podman is the interpreter (the value is trusted — argv-
@@ -169,6 +211,37 @@ mod tests {
                 "{bad:?} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn volume_names_are_extracted_from_mount_specs() {
+        // source (the primary form) and name (the alternate) are both
+        // read; declaration order is kept; duplicates collapse.
+        assert_eq!(
+            volume_names_from_specs(&[
+                "type=volume,source=steelbx-it-vol,destination=/data".to_string(),
+                "type=volume,name=steelbx-it-vol,destination=/data2".to_string(),
+                "type=volume,source=other,destination=/x".to_string(),
+            ]),
+            vec!["steelbx-it-vol".to_string(), "other".to_string()]
+        );
+        // Non-volume specs contribute nothing; an unnamed (anonymous)
+        // volume contributes nothing either.
+        assert_eq!(
+            volume_names_from_specs(&[
+                "type=bind,src=/a,dst=/b".to_string(),
+                "type=devpts,destination=/dev/pts".to_string(),
+                "type=volume,destination=/data".to_string(),
+            ]),
+            Vec::<String>::new()
+        );
+        assert!(is_volume_mount_spec("type=volume,source=v,destination=/d"));
+        assert!(!is_volume_mount_spec("type=bind,src=/a,dst=/b"));
+        // An empty source is treated as unnamed.
+        assert_eq!(
+            volume_name_from_mount_spec("type=volume,source=,destination=/d"),
+            None
+        );
     }
 
     #[test]

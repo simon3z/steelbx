@@ -671,6 +671,65 @@ fn g8_runtime_env_copies_from_the_caller_env() {
     pod.remove_container("steelbx-it-re", true).unwrap();
 }
 
+/// `delete_volumes` lifecycle: a named volume mount is created on
+/// demand, written as the `box.volumes` label (round-tripping through
+/// `inspect` as both the label and the `Mounts`-derived name), and
+/// `rm` removes the box AND its labeled volume. In-use volumes
+/// survive: a second box mounting the same volume keeps it alive.
+/// Skipped when podman is unavailable.
+#[test]
+fn g10_volume_lifecycle() {
+    if !podman_available() {
+        eprintln!("skipping: podman not available");
+        return;
+    }
+    let pod = steelbx::driver::Podman::detect().unwrap();
+    ensure_base_image_local("registry.fedoraproject.org/fedora:42");
+    let vol = "steelbx-it-vol";
+    let spec = steelbx::driver::CreateSpec {
+        image: "registry.fedoraproject.org/fedora:42".to_string(),
+        command: vec!["sleep".to_string(), "infinity".to_string()],
+        mount_specs: vec!["type=volume,source=steelbx-it-vol,destination=/data".to_string()],
+        volumes: vec![vol.to_string()],
+        ..Default::default()
+    };
+    pod.create("steelbx-it-vol-a", &spec).unwrap();
+
+    // The label round-trips through inspect (declared + `Mounts`-derived).
+    let info = pod.inspect("steelbx-it-vol-a").unwrap().unwrap();
+    assert_eq!(info.volumes, vec![vol.to_string()]);
+    assert_eq!(info.volume_mounts, vec![vol.to_string()]);
+
+    // The named volume exists.
+    assert!(
+        podman_ok(&["volume", "exists", vol]).is_ok(),
+        "the named volume must exist after create"
+    );
+
+    g10_in_use_guard(&pod, vol, &spec);
+}
+
+/// g10 in-use guard: a second box sharing the volume keeps it alive —
+/// removing the first box must NOT remove the volume (podman's in-use
+/// guard, named in the error); once the last user is gone, the volume
+/// removal succeeds.
+fn g10_in_use_guard(pod: &steelbx::driver::Podman, vol: &str, spec: &steelbx::driver::CreateSpec) {
+    pod.create("steelbx-it-vol-b", spec).unwrap();
+    pod.remove_container("steelbx-it-vol-a", true).unwrap();
+    let msg = format!("{}", pod.remove_volumes(&[vol.to_string()]).unwrap_err());
+    assert!(
+        msg.to_lowercase().contains("use"),
+        "an in-use volume must be refused, naming the usage: {msg}"
+    );
+    assert!(podman_ok(&["volume", "exists", vol]).is_ok());
+    pod.remove_container("steelbx-it-vol-b", true).unwrap();
+    pod.remove_volumes(&[vol.to_string()]).unwrap();
+    assert!(
+        podman_ok(&["volume", "exists", vol]).is_err(),
+        "the volume must be gone after its last box is removed"
+    );
+}
+
 /// `create -i` completion is a union of the two marker labels
 /// (`com.github.simon3z.steelbx.box`, `com.github.containers.toolbox`), podman-side filtered,
 /// and an image carrying both appears once. Skipped when podman is

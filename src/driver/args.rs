@@ -128,6 +128,11 @@ pub struct CreateSpec {
     /// Podman `--mount` specs from the config `mounts` key — passthrough
     /// (podman interprets), in addition to the derived bind mounts.
     pub mount_specs: Vec<String>,
+    /// The NAMED volumes the `mounts` specs declare (`type=volume,
+    /// source=<name>`), rendered as the `box.volumes` label — written
+    /// only when the profile sets `delete_volumes`; read back at `rm`,
+    /// which removes them after the container is gone.
+    pub volumes: Vec<String>,
     /// The main command argv, rendered after the image:
     /// a profile `entry`, the image's own command (empty — the
     /// `com.github.simon3z.steelbx.box.cmd` label), or the heartbeat default
@@ -167,6 +172,13 @@ impl From<&crate::config::SteelbxConfig> for CreateSpec {
             runtime_env: cfg.runtime_env.clone(),
             security_opts: cfg.security_opts.clone(),
             mount_specs: cfg.mounts.clone(),
+            // The named volumes the `mounts` declare, only under
+            // `delete_volumes` — the `box.volumes` label's content.
+            volumes: if cfg.delete_volumes {
+                crate::validate::volume_names_from_specs(&cfg.mounts)
+            } else {
+                Vec::new()
+            },
             init: cfg.init.clone(),
             cgroupns: cfg.cgroupns.clone(),
             ipc: cfg.ipc.clone(),
@@ -309,6 +321,13 @@ impl Podman {
                 args,
                 "--label",
                 &format!("{}={}", super::BOX_ENV_LABEL, spec.runtime_env.join(",")),
+            );
+        }
+        if !spec.volumes.is_empty() {
+            Self::flag(
+                args,
+                "--label",
+                &format!("{}={}", super::BOX_VOLUMES_LABEL, spec.volumes.join(",")),
             );
         }
     }
@@ -610,6 +629,29 @@ mod tests {
         let i = a.iter().position(|x| x == "--label").unwrap();
         assert_eq!(a[i + 1], "com.github.simon3z.steelbx.box=true");
         assert_eq!(a[i + 3], "com.github.simon3z.steelbx.box.name=pi");
+    }
+
+    /// The `box.volumes` label: rendered only when declared, one
+    /// comma-separated value (podman labels cannot repeat a key).
+    #[test]
+    fn create_renders_the_box_volumes_label_when_declared() {
+        let a = Podman::create_args("pi", &spec());
+        assert!(!a
+            .iter()
+            .any(|x| { x.starts_with("com.github.simon3z.steelbx.box.volumes=") }));
+
+        let mut s = spec();
+        s.mount_specs = vec![
+            "type=volume,source=vol-a,destination=/data".to_string(),
+            "type=volume,source=vol-b,destination=/data2".to_string(),
+        ];
+        s.volumes = vec!["vol-a".to_string(), "vol-b".to_string()];
+        let a = Podman::create_args("pi", &s);
+        let i = a
+            .iter()
+            .position(|x| x == "com.github.simon3z.steelbx.box.volumes=vol-a,vol-b")
+            .unwrap();
+        assert_eq!(a[i - 1], "--label");
     }
 
     /// The `box.env` label: rendered only when declared, one

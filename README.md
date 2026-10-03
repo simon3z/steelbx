@@ -112,8 +112,8 @@ Enter with: steelbx enter my-workload-1a2b3c4d
 - `rm` takes the box name; `--force` kills a running box
 - `ps` lists boxes with their live state
 
-The box is a named container carrying three labels (`...box`,
-`...box.name`, `...box.env`) — full label semantics are
+The box is a named container carrying four labels (`...box`,
+`...box.name`, `...box.env`, `...box.volumes`) — full label semantics are
 [below](#shell-completion). Steelbx owns no state of its own: the
 labels live on the container, and everything else lives in podman.
 
@@ -258,9 +258,29 @@ tab completion and the unknown-profile error name what exists.
 
 ### The pinned baseline
 
-`steelbx create` builds a podman `create` from a **pinned baseline** —
-it is *not* a pass-through. The baseline is reviewed code, and the
-image + config + CLI add layout and policy on top.
+### Volumes
+
+The `mounts` key can declare named volumes, the way it declares any
+podman `--mount` spec — podman creates them on demand at `create`:
+
+```toml
+mounts = ["type=volume,source=$STEELBX_BOX_NAME-data,destination=/data"]
+```
+
+Naming the volume after the box (the `STEELBX_BOX_NAME` expansion
+variable) makes each box own its own volume; a fixed name instead is
+a *shared* volume between boxes.
+
+By default a volume survives `steelbx rm` — podman's own behavior, no
+steelbx state involved. A profile opts its volumes into box removal
+with `delete_volumes = true`: the names are written to the box's
+`box.volumes` label at create, and `rm` (and `run`'s auto-removal)
+removes them after the container is gone — the label is the policy's
+carrier, the profile is never reloaded. `steelbx rm -V` removes
+*every* `type=volume` mount a box carried, labeled or not. Podman's
+in-use guard does the safety: a volume another live box still mounts
+survives, and is named in the error. Anonymous (unnamed) volume mounts
+are not tracked by the label.
 
 | Input | Behavior |
 |---|---|
@@ -275,7 +295,8 @@ image + config + CLI add layout and policy on top.
 | `env_files` (config) | Ordered env files (`KEY=VALUE` per line; `#` comments, optional `export `); later files override earlier. An expansion *source*: their variables can be referenced by other values (and by `[env]` values), but they are NOT passed to the container. Paths expand like other values; a missing file or a malformed line is an error. |
 | `[env]` (config) | The only env the container is created with (rendered in the order given, order-preserving). Keys must be valid env names; values are trusted (it's your box). Same-key wins over the image's ENV. Values expand against the caller env plus `env_files`. |
 | `runtime_env` (config) | Runtime env NAMES (not values; shape-checked, not expanded). Merged with the image's `box.env` label into the box's own `box.env` label. At enter/exec, each name set in the caller env is passed as bare `podman exec -e NAME` (the value is never argv); unset names are left alone and named in one info line. |
-| `mounts` (config) | Podman `--mount` specs, rendered verbatim — e.g. `type=devpts,destination=/dev/pts` — in addition to the derived bind mounts (podman interprets; shape-checked). |
+| `mounts` (config) | Podman `--mount` specs, rendered verbatim — e.g. `type=devpts,destination=/dev/pts` — in addition to the derived bind mounts (podman interprets; shape-checked). A `type=volume` spec names the volume via `source` (or `name`); podman creates it on demand. |
+| `delete_volumes` (config) | Whether `rm` (and `run`'s auto-removal) removes the named volumes the `mounts` key declares: written as the `box.volumes` label at create, read back at `rm`. Absent = `false` — the volumes survive `rm` (podman's default). |
 | `security_opts` (config) | `key=value` entries rendered as podman `--security-opt` (e.g. `label=disable` — SELinux labeling off); omitted = podman's default security posture. |
 | `[profile]` (CLI) | Selects a `profiles/<name>.conf` — a complete `containers.conf` (replace semantics, no merging). Defaults to `default`; optional when `-i` provides the image. |
 | caps | Not configurable: the baseline is podman's default posture. |
@@ -292,7 +313,7 @@ shapes are rejected by validation, before anything runs.
 | `steelbx run [-p <profile>] [-i <image>] [-n <name>] [-e NAME] <paths...>` | Disposable box: create → enter → auto-rm, like `podman run --rm`. The profile is a flag (`-p`) so every positional is a mount dir; the name is `-n` (verbatim) or a unique name (the profile's `name` key, or the image base, + a fresh token); the box is force-removed on exit and the exit code is the session's (130 if interrupted). TTY required |
 | `steelbx enter <box-name> [-e NAME]` | Start if needed, interactive shell (TTY required); `-e NAME` exposes a caller env var for the session (the box's declared runtime env is always injected) |
 | `steelbx exec <box-name> [-e NAME] cmd...` | One-shot command; `-e NAME` as above |
-| `steelbx rm <box-name>` | Remove; silent on success, `--force` kills running |
+| `steelbx rm <box-name> [--force] [--volumes]` | Remove; silent on success, `--force` kills running. The box's `delete_volumes` volumes (its `box.volumes` label) are removed with it; `--volumes` removes every `type=volume` mount the box carried. In-use volumes (another live box still mounts them) survive, named in the error |
 | `steelbx ps` | List boxes: name, state, image, age |
 
 `--verbose` (`-v`): print each podman command as it runs, on stderr —
@@ -342,6 +363,12 @@ conventionally `true`, never read; the env list is read):
   profile's `runtime_env` ∪ the image's, written at create).
   `enter`/`exec` read it and inject each name set in the caller env
   as bare `-e`.
+- `com.github.simon3z.steelbx.box.volumes` — on a container, the
+  NAMED volumes the box's `mounts` declare (a comma-separated list),
+  written at create only when the profile sets `delete_volumes =
+  true`. `rm` reads it back and removes those volumes after the
+  container is gone; `run`'s auto-removal does the same. Presence is
+  the policy — the profile is never reloaded.
 
 Mark an image at build time:
 

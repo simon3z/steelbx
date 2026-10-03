@@ -98,13 +98,21 @@ enum Cmd {
         #[arg(short = 'e', long = "env")]
         env: Vec<String>,
     },
-    /// Remove boxes; fails if running — --force force-deletes
+    /// Remove boxes; fails if running — --force force-deletes;
+    /// --volumes removes the box's volumes too
     Rm {
         /// Box names
         #[arg(add = ArgValueCompleter::new(box_name_candidates))]
         box_names: Vec<String>,
         #[arg(long, short = 'f')]
         force: bool,
+        /// Remove the box's volumes too: every `type=volume` mount the
+        /// box carried. Without it, only the volumes the profile
+        /// declared under `delete_volumes` (the `box.volumes` label) are
+        /// removed. In-use volumes (another live box still mounts them)
+        /// survive, named in the error.
+        #[arg(long, short = 'V')]
+        volumes: bool,
     },
     /// List boxes: name, state
     Ps,
@@ -152,6 +160,12 @@ fn main() -> anyhow::Result<()> {
     provision_env()?;
     let cli = Cli::parse();
     driver::set_verbose(cli.verbose);
+    dispatch(&cli)
+}
+
+/// Dispatch the parsed CLI to the command handlers. The `run` arm exits
+/// the process with the session's code — the only arm that does.
+fn dispatch(cli: &Cli) -> anyhow::Result<()> {
     match &cli.cmd {
         Cmd::Create {
             profile,
@@ -178,7 +192,11 @@ fn main() -> anyhow::Result<()> {
             paths,
         )),
         Cmd::Enter { box_name, env } => cmd_enter(box_name, env),
-        Cmd::Rm { box_names, force } => cmd_rm(box_names, *force),
+        Cmd::Rm {
+            box_names,
+            force,
+            volumes,
+        } => cmd_rm(box_names, *force, *volumes),
         Cmd::Ps => cmd_ps(),
         Cmd::Exec { box_name, env, cmd } => cmd_exec(box_name, env, cmd),
         Cmd::Completion { shell } => cmd_completion(*shell),
@@ -284,6 +302,13 @@ fn run_session(pod: &Podman, name: &str, spec: &CreateSpec, env: &[String], prof
     // must not read as success — the box leaks if we stay silent.
     if let Err(e) = pod.remove_container(name, true) {
         eprintln!("warning: box '{name}' still exists ({e})");
+    } else if !spec.volumes.is_empty() {
+        // The profile's `delete_volumes`: the box's named volumes go with
+        // it (the same names written to the `box.volumes` label at
+        // create; in-use volumes survive, named in the error).
+        if let Err(e) = pod.remove_volumes(&spec.volumes) {
+            eprintln!("warning: volumes of '{name}' could not be removed ({e})");
+        }
     }
     if INTERRUPTED.load(Ordering::SeqCst) {
         130
@@ -589,13 +614,27 @@ fn validate_cli_env(env: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_rm(box_names: &[String], force: bool) -> anyhow::Result<()> {
+/// `rm` with volume removal: the container goes first, then the
+/// volumes — podman's in-use guard only trips for a volume another
+/// live box still mounts (it survives, named in the error). Without
+/// `--volumes`, only the volumes the profile declared under
+/// `delete_volumes` (the `box.volumes` label) are removed; `rm`
+/// never re-loads a profile — the label is the policy's carrier.
+fn cmd_rm(box_names: &[String], force: bool, volumes: bool) -> anyhow::Result<()> {
     let pod = Podman::detect()?;
     driver::warn_rootful();
     for name in box_names {
-        resolve_box(&pod, name)?;
+        let info = resolve_box(&pod, name)?;
         // The enforcement lives in the driver: plain rm refuses a running box.
         pod.remove_container(name, force)?;
+        let targets = if volumes {
+            info.volume_mounts.clone()
+        } else {
+            info.volumes.clone()
+        };
+        if !targets.is_empty() {
+            pod.remove_volumes(&targets)?;
+        }
     }
     // Silent on success.
     Ok(())

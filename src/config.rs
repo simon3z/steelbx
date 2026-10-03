@@ -539,6 +539,14 @@ pub struct SteelbxConfig {
     /// heartbeat.
     #[serde(default)]
     pub entry: Vec<String>,
+    /// Whether `rm` (and `run`'s auto-removal) removes the named
+    /// volumes the `mounts` key declares (`type=volume,source=<name>`):
+    /// written to the box's `box.volumes` label at create, read back at
+    /// `rm` (the profile is not reloaded). Absent = `false` — the
+    /// volumes survive `rm` (podman's default). Anonymous (unnamed)
+    /// volume mounts are not tracked by the label.
+    #[serde(default)]
+    pub delete_volumes: bool,
     /// Post-create initialization: `[init]` — `cmd` is an
     /// array of argvs (each inner array = one exec, in order),
     /// Layout override: the container path under
@@ -809,6 +817,7 @@ impl SteelbxConfig {
         }
         validate_security_opts(&cfg.security_opts)?;
         validate_mount_specs(&cfg.mounts)?;
+        Self::warn_anonymous_volume_mounts(cfg);
         validate_ns_and_ulimits(cfg)?;
         validate_workdir(&cfg.workdir)?;
         // `name`: the effective box name (always set after load) — a
@@ -826,6 +835,26 @@ impl SteelbxConfig {
         cfg.network = trim_or_absent(cfg.network.take());
         cfg.image = trim_or_absent(cfg.image.take());
         Ok(())
+    }
+
+    /// `delete_volumes`: an unnamed (anonymous) volume mount cannot be
+    /// tracked by name — warn (it is not in the `box.volumes` label),
+    /// never fail.
+    fn warn_anonymous_volume_mounts(cfg: &SteelbxConfig) {
+        if !cfg.delete_volumes {
+            return;
+        }
+        for (i, m) in cfg.mounts.iter().enumerate() {
+            if crate::validate::is_volume_mount_spec(m)
+                && crate::validate::volume_name_from_mount_spec(m).is_none()
+            {
+                eprintln!(
+                    "warning: delete_volumes is set but mounts[{i}] declares a \
+                     type=volume mount without a name — it is not tracked \
+                     in the box's box.volumes label"
+                );
+            }
+        }
     }
 }
 
