@@ -259,6 +259,24 @@ tab completion and the unknown-profile error name what exists.
 
 ### The pinned baseline
 
+Every box is built on a pinned `podman create` baseline that no
+profile or CLI flag can change:
+
+- `--name` and `--hostname` are the effective box name (the identity
+  inside the box matches the box's identity to podman).
+- `--pull=missing`: the image is pulled only if it is not already
+  local — never re-pulled, never overwritten.
+- The image's declared `[init]` steps run as PID 1 under podman's
+  `_podman_init` (private pid namespace); when the box shares the
+  host pid namespace the container idles on `sleep infinity` instead.
+- The box marker labels (`com.github.simon3z.steelbx.box`, the
+  `...box.name` label, and the `...box.env`/`...box.volumes` labels
+  when declared) are always written — `ps` and `rm` find boxes by
+  label, never by name pattern.
+
+Profiles and the CLI supply only the rest: image, `--`, env, mounts,
+network, security, ulimits.
+
 ### Volumes
 
 The `mounts` key can declare named volumes, the way it declares any

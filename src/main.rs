@@ -3,13 +3,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Context;
 
-use clap::{CommandFactory, Parser, Subcommand, ValueHint};
-use clap_complete::aot::{generate, Shell};
-use clap_complete::engine::{ArgValueCompleter, CompletionCandidate};
-use clap_complete::CompleteEnv;
+use clap::{Parser, Subcommand, ValueHint};
+use clap_complete::aot::Shell;
+use clap_complete::engine::ArgValueCompleter;
 
 use steelbx::config::{self, SteelbxConfig};
 use steelbx::driver::{self, CreateSpec, Podman};
+
+mod complete;
 
 #[derive(Parser)]
 #[command(
@@ -37,13 +38,13 @@ enum Cmd {
         /// (shipped; a user profile of the same name overrides).
         /// Defaults to `default`.
         /// Completes from the profiles dirs.
-        #[arg(short = 'p', long = "profile", add = ArgValueCompleter::new(profile_candidates))]
+        #[arg(short = 'p', long = "profile", add = ArgValueCompleter::new(complete::profile_candidates))]
         profile: Option<String>,
         /// Image override for the profile's `image` key (auto-pulled
         /// if not local). Completes from local images carrying the
         /// `com.github.simon3z.steelbx.box` or
         /// `com.github.containers.toolbox` label.
-        #[arg(short = 'i', long = "image", add = ArgValueCompleter::new(image_candidates))]
+        #[arg(short = 'i', long = "image", add = ArgValueCompleter::new(complete::image_candidates))]
         image: Option<String>,
         /// Box name (container name), pinned verbatim (no random
         /// token). Precedence: this flag > the profile's `name` key
@@ -52,7 +53,7 @@ enum Cmd {
         /// effective name is available to profile values as
         /// STEELBX_BOX_NAME. A taken pinned name is refused.
         /// Completes from the live boxes.
-        #[arg(short = 'n', long = "name", add = ArgValueCompleter::new(box_name_candidates))]
+        #[arg(short = 'n', long = "name", add = ArgValueCompleter::new(complete::box_name_candidates))]
         box_name: Option<String>,
         /// Host paths, mounted at <WORKDIR>/<basename> (the profile key
         /// mount_dest = absolute mounts each at its own full path)
@@ -65,18 +66,18 @@ enum Cmd {
     Run {
         /// Policy profile. Defaults to `default`. Completes from the
         /// profiles dirs.
-        #[arg(short = 'p', long = "profile", add = ArgValueCompleter::new(profile_candidates))]
+        #[arg(short = 'p', long = "profile", add = ArgValueCompleter::new(complete::profile_candidates))]
         profile: Option<String>,
         /// Image override (auto-pulled if not local). Completes from
         /// marked local images.
-        #[arg(short = 'i', long = "image", add = ArgValueCompleter::new(image_candidates))]
+        #[arg(short = 'i', long = "image", add = ArgValueCompleter::new(complete::image_candidates))]
         image: Option<String>,
         /// Box name to pin, verbatim (no random token). Precedence:
         /// this flag, then the profile's `name` key (unique by
         /// default), then a generated unique name. Profile values
         /// reference the effective name (STEELBX_BOX_NAME is the
         /// expansion variable).
-        #[arg(short = 'n', long = "name", add = ArgValueCompleter::new(box_name_candidates))]
+        #[arg(short = 'n', long = "name", add = ArgValueCompleter::new(complete::box_name_candidates))]
         box_name: Option<String>,
         /// Expose a caller env variable to the session (bare NAME).
         /// Repeatable. The box's declared runtime env is always
@@ -91,7 +92,7 @@ enum Cmd {
     /// Enter a box: start if needed, then interactive shell
     Enter {
         /// Box name
-        #[arg(add = ArgValueCompleter::new(box_name_candidates))]
+        #[arg(add = ArgValueCompleter::new(complete::box_name_candidates))]
         box_name: String,
         /// Expose a caller env variable to the box (bare NAME — podman
         /// copies the value from your shell; `NAME=VALUE` is refused).
@@ -104,7 +105,7 @@ enum Cmd {
     /// --volumes removes the box's volumes too
     Rm {
         /// Box names
-        #[arg(add = ArgValueCompleter::new(box_name_candidates))]
+        #[arg(add = ArgValueCompleter::new(complete::box_name_candidates))]
         box_names: Vec<String>,
         #[arg(long, short = 'f')]
         force: bool,
@@ -121,7 +122,7 @@ enum Cmd {
     /// Run a one-shot command in a box
     Exec {
         /// Box name
-        #[arg(add = ArgValueCompleter::new(box_name_candidates))]
+        #[arg(add = ArgValueCompleter::new(complete::box_name_candidates))]
         box_name: String,
         /// Expose a caller env variable to the box (bare NAME — podman
         /// copies the value from your shell; `NAME=VALUE` is refused).
@@ -141,21 +142,12 @@ enum Cmd {
     },
 }
 
-/// Dynamic completion (clap_complete engine): the sourced shell function
-/// re-invokes this binary (`COMPLETE=<shell> ...`); the request is handled
-/// and the process exits before any parsing. Must run before stdout writes.
-fn init_completion() {
-    CompleteEnv::with_factory(Cli::command)
-        .completer("steelbx")
-        .complete();
-}
-
 fn main() -> anyhow::Result<()> {
     // Dynamic completion (clap_complete engine): the sourced shell
     // function re-invokes this binary (`COMPLETE=<shell> ...`); the
     // request is handled and the process exits before any parsing. It
     // must run before anything writes to stdout.
-    init_completion();
+    complete::init_completion();
     // Steelbx-provided env: the standard locations, set if
     // the caller hasn't overridden them — expansion and child
     // processes see the same values.
@@ -201,7 +193,7 @@ fn dispatch(cli: &Cli) -> anyhow::Result<()> {
         } => cmd_rm(box_names, *force, *volumes),
         Cmd::Ps => cmd_ps(),
         Cmd::Exec { box_name, env, cmd } => cmd_exec(box_name, env, cmd),
-        Cmd::Completion { shell } => cmd_completion(*shell),
+        Cmd::Completion { shell } => complete::cmd_completion(*shell),
     }
 }
 
@@ -457,10 +449,9 @@ fn create_layout(
     Ok((workdir, mounts))
 }
 
-/// Image precedence: the `-i` flag > the profile's `image` key;
-/// neither = an error that names both ways out.
 /// The image: the CLI `-i` (when given), else the profile's `image`
-/// (already expanded by the pre-pass).
+/// (already expanded by the pre-pass); neither = an error that names
+/// both ways out.
 fn resolve_image(
     flag: Option<&str>,
     profile_image: Option<&str>,
@@ -710,48 +701,11 @@ fn cmd_exec(box_name: &str, env: &[String], cmd: &[String]) -> anyhow::Result<()
     Ok(())
 }
 
-/// Best-effort candidates, prefix-filtered: on error the underlying
-/// source yields nothing and the shell keeps its default completion.
-fn complete(candidates: Vec<String>, current: &std::ffi::OsStr) -> Vec<CompletionCandidate> {
-    let current = current.to_str().unwrap_or_default();
-    candidates
-        .into_iter()
-        .filter(|n| n.starts_with(current))
-        .map(CompletionCandidate::new)
-        .collect()
-}
-
-/// Image tab completion: local images marked with `com.github.simon3z.steelbx.box`
-/// or `com.github.containers.toolbox`, one `podman images` call per marker
-/// (podman-side label filter). Attached to `create`'s `-i` argument.
-fn image_candidates(current: &std::ffi::OsStr) -> Vec<CompletionCandidate> {
-    let pod = Podman;
-    complete(pod.image_names().unwrap_or_default(), current)
-}
-
-/// Profile tab completion: the `profiles/*.conf` names, one `read_dir`.
-/// Attached to `create`'s `--profile`.
-fn profile_candidates(current: &std::ffi::OsStr) -> Vec<CompletionCandidate> {
-    complete(SteelbxConfig::list_profiles().unwrap_or_default(), current)
-}
-
-/// Box-name tab completion: the live boxes, one `podman ps` (no
-/// version round-trip). Attached to `enter`/`rm`/`exec` box names.
-fn box_name_candidates(current: &std::ffi::OsStr) -> Vec<CompletionCandidate> {
-    let pod = Podman;
-    complete(pod.box_names().unwrap_or_default(), current)
-}
-
-fn cmd_completion(shell: Shell) -> anyhow::Result<()> {
-    let mut cmd = Cli::command();
-    generate(shell, &mut cmd, "steelbx", &mut std::io::stdout());
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap_complete::aot::generate_to;
+    use clap::CommandFactory;
+    use clap_complete::aot::{generate, generate_to};
 
     /// The test-built binary. `CARGO_BIN_EXE_steelbx` is set for test
     /// targets that depend on the bin (integration tests); the bin's
