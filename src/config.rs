@@ -14,11 +14,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use indexmap::IndexMap;
 
-use crate::expand::expand_env;
 use crate::validate::{
-    canonicalize, validate_env, validate_extra_hosts, validate_mount_options, validate_mount_specs,
-    validate_ns_value, validate_security_opts, MountDest,
+    canonicalize, validate_env, validate_extra_hosts, validate_ns_value, validate_security_opts,
 };
+
+use crate::mount::{validate_mount_options, validate_mount_specs, MountDest};
 
 /// The config dir: `$HOME/.config/steelbx` (the XDG config location,
 /// made steelbx-specific) — where `profiles/` lives, and
@@ -46,259 +46,6 @@ pub(crate) fn system_profiles_dir() -> PathBuf {
 /// in the config dir, data here.
 pub fn data_dir(home: &Path) -> PathBuf {
     home.join(".local/share/steelbx")
-}
-
-/// The `[init]` steps, expanded: the verb is a grammar token (no
-/// expansion); every argument expands. `cp` steps: the host source is
-/// re-canonicalized after expansion, the dest a string.
-fn expand_init(
-    init: &mut Option<crate::driver::Init>,
-    caller: &HashMap<String, String>,
-) -> Result<()> {
-    let Some(init) = init else {
-        return Ok(());
-    };
-    for (i, step) in init.iter_mut().enumerate() {
-        match step {
-            // The verb is a grammar token (no expansion); every
-            // argument expands.
-            crate::driver::InitStep::Exec(argv) => {
-                for (j, c) in argv.iter_mut().enumerate() {
-                    *c = expand_env(c, caller, &format!("init[{i}][{j}]"))?;
-                }
-            }
-            crate::driver::InitStep::Cp { host, dest } => {
-                let s = host.to_string_lossy().to_string();
-                let d = dest.clone();
-                *host = expand_env(&s, caller, &format!("init[{i}].0")).map(PathBuf::from)?;
-                *dest = expand_env(&d, caller, &format!("init[{i}].1"))?;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// The pre-pass of the load pipeline: expands what the caller needs
-/// before the full pass, in the order that decides the box name first.
-/// The final name is decided before `[env]` and `image` expand: the
-/// CLI `-n` flag (verbatim), else the profile's `name` key (expanded
-/// against the caller env plus `env_files`, empty is absent,
-/// shape-checked) with a fresh random token appended (unique by
-/// default; `name_unique = false` pins it verbatim). When a name is
-/// known, it is `STEELBX_BOX_NAME` in the context for `[env]` and
-/// `image` — both may reference it. When no name is declared (a
-/// generated name), `STEELBX_BOX_NAME` is not yet known here — a
-/// reference in `[env]` or `image` fails loudly; every other value
-/// gets the generated name in the full pass. The inline `[env]` values
-/// expand against the caller env plus `env_files` plus the known name
-/// (they do not reference each other); `image` expands against that
-/// plus the expanded `[env]` — so `image = "$IMG"` may refer to a
-/// variable declared in `env_files` or `[env]`. The profile's `name`
-/// key expands against the caller env plus `env_files` (it is decided
-/// first, so it cannot reference `[env]` values). The expanded values
-/// are stored in their slots; the full pass (`expand_with_env`) does
-/// not re-expand them. Returns (image, declared name, final name).
-fn pre_expand_with_env(
-    cfg: &mut SteelbxConfig,
-    caller: &HashMap<String, String>,
-    name_flag: Option<&str>,
-) -> Result<(Option<String>, Option<String>, Option<String>)> {
-    let file_env = load_env_files_env(&cfg.env_files, caller)?;
-    let mut ctx = caller.clone();
-    merge_ctx(&mut ctx, &file_env);
-    // The name, decided first: the CLI `-n` flag (verbatim; it wins —
-    // the profile key is replaced by it), else the profile's `name`
-    // key. A declared name is unique by default: a fresh random token
-    // is appended unless `name_unique = false`.
-    let declared = match name_flag {
-        Some(n) => Some(n.to_string()),
-        None => expand_declared_name(cfg, &ctx)?,
-    };
-    let final_name = declared.as_ref().map(|d| {
-        if name_flag.is_some() || !cfg.name_unique() {
-            d.clone()
-        } else {
-            crate::driver::unique_name(d)
-        }
-    });
-    // When known, the final name is STEELBX_BOX_NAME for [env] and
-    // image (it is the name the box is actually created as).
-    if let Some(n) = &final_name {
-        ctx.insert("STEELBX_BOX_NAME".to_string(), n.clone());
-    }
-    // [env] values, against caller+files+name (they do not reference
-    // each other).
-    for (k, v) in cfg.env.iter_mut() {
-        *v = expand_env(v, &ctx, &format!("env.{k}"))?;
-    }
-    // Now the inline [env] feeds every other value too.
-    for (k, v) in cfg.env.iter() {
-        ctx.insert(k.clone(), v.clone());
-    }
-    // The image key, against the full context (name + [env]).
-    let image = cfg
-        .image
-        .take()
-        .map(|v| expand_env(&v, &ctx, "image"))
-        .transpose()?;
-    cfg.image = image.clone();
-    Ok((image, declared, final_name))
-}
-
-/// Expand the profile's `name` key (caller+files; empty is absent;
-/// shape-checked — a valid podman name, before any token is added).
-fn expand_declared_name(
-    cfg: &mut SteelbxConfig,
-    ctx: &HashMap<String, String>,
-) -> Result<Option<String>> {
-    let Some(v) = cfg.name.take() else {
-        return Ok(None);
-    };
-    let v = expand_env(&v, ctx, "name")?.trim().to_string();
-    if v.is_empty() {
-        return Ok(None);
-    }
-    if !crate::driver::is_valid_name(&v) {
-        anyhow::bail!("name: {v:?} is not a valid box name");
-    }
-    Ok(Some(v))
-}
-
-/// Expand one caller-env string value in place.
-fn expand_slot(
-    slot: &mut Option<String>,
-    caller: &HashMap<String, String>,
-    path: &str,
-) -> Result<()> {
-    if let Some(v) = slot.take() {
-        *slot = Some(expand_env(&v, caller, path)?);
-    }
-    Ok(())
-}
-
-/// Load `env_files` into a variable map: each file is parsed as
-/// `KEY=VALUE` lines (later lines override earlier), later files override
-/// earlier files. This map is an expansion *source* only — it is NOT the
-/// container env (that is the inline `[env]`). Paths and values expand
-/// against the caller env. A missing file or a malformed line is an
-/// error naming the file.
-fn load_env_files_env(
-    paths: &[String],
-    caller: &HashMap<String, String>,
-) -> Result<IndexMap<String, String>> {
-    let mut out = IndexMap::new();
-    for raw in paths {
-        let path = expand_env(raw, caller, "env_files")?;
-        let path = canonicalize(&path)?;
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading env file {}", path.display()))?;
-        let path_str = path.to_string_lossy();
-        parse_env_file(&content, path_str.as_ref(), &mut out)?;
-    }
-    Ok(out)
-}
-
-/// Fold `src` into the expansion context `ctx` (keys inserted/updated).
-fn merge_ctx(ctx: &mut HashMap<String, String>, src: &IndexMap<String, String>) {
-    for (k, v) in src {
-        ctx.insert(k.clone(), v.clone());
-    }
-}
-
-/// Insert `key`/`value` into `out`: a redefined key updates its value in
-/// place (keeping its position), a new key appends. This is the
-/// `KEY=VALUE` assignment rule the env files and `[env]` share.
-fn put_env(out: &mut IndexMap<String, String>, key: &str, value: String) {
-    match out.get_mut(key) {
-        Some(slot) => *slot = value,
-        None => {
-            out.insert(key.to_string(), value);
-        }
-    }
-}
-
-/// Parse one env file into `out` (later lines override earlier ones).
-/// Blank lines and `#` comments are ignored; a line is `KEY=VALUE` (an
-/// optional leading `export ` is stripped, and whitespace around the
-/// `=` is tolerated). The key must be a valid env name; the value is
-/// everything after the first `=` (may be empty or contain spaces) and is
-/// left raw for a later expansion pass.
-fn parse_env_file(content: &str, path: &str, out: &mut IndexMap<String, String>) -> Result<()> {
-    for (i, line) in content.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let line = line.strip_prefix("export ").unwrap_or(line).trim();
-        let Some((k, v)) = line.split_once('=') else {
-            bail!("{path}:{}: expected KEY=VALUE (got {line:?})", i + 1);
-        };
-        let k = k.trim();
-        if !crate::validate::is_valid_env_name(k) {
-            bail!("{path}:{}: {k:?} is not a valid variable name", i + 1);
-        }
-        put_env(out, k, v.trim().to_string());
-    }
-    Ok(())
-}
-
-/// The full pass of the load pipeline: expands every string value not
-/// yet expanded — the `network` string, each `extra_hosts` element,
-/// each `security_opts` element, each `mounts` spec, and the
-/// namespace/identity values (`cgroupns`, `ipc`, `pid`, `userns`, `user`,
-/// `ulimits`). Keys never expand (an env key is a name, not a value).
-/// The `[env]`, `image`, and `name` slots were already expanded by the
-/// pre-pass (`pre_expand_with_env`) and are skipped. `box_name` is
-/// always defined (the CLI `-n` override, the profile's `name` key, or
-/// the generated unique name): it is injected as `STEELBX_BOX_NAME`
-/// before the `[env]` values feed the context, so every value —
-/// including `[env]` — may reference it, and it is stored in
-/// `cfg.name`. Caveat: values that are *host* paths (`mounts` sources,
-/// `init` cp sources) must refer to caller/steelbx variables, not
-/// container-only `[env]` names.
-fn expand_with_env(
-    cfg: &mut SteelbxConfig,
-    caller: &HashMap<String, String>,
-    box_name: &str,
-) -> Result<()> {
-    // The env_files variables: an expansion source only (not the
-    // container env — that is the inline [env]). Later files override
-    // earlier; their values expand against the caller env alone.
-    let file_env = load_env_files_env(&cfg.env_files, caller)?;
-    // The expansion context: the caller env, plus the env_files
-    // variables, plus STEELBX_BOX_NAME, plus (the already-expanded)
-    // inline [env].
-    let mut ctx = caller.clone();
-    merge_ctx(&mut ctx, &file_env);
-    ctx.insert("STEELBX_BOX_NAME".to_string(), box_name.to_string());
-    for (k, v) in cfg.env.iter() {
-        ctx.insert(k.clone(), v.clone());
-    }
-    cfg.name = Some(box_name.to_string());
-    expand_slot(&mut cfg.network, &ctx, "network")?;
-    expand_slot(&mut cfg.cgroupns, &ctx, "cgroupns")?;
-    expand_slot(&mut cfg.ipc, &ctx, "ipc")?;
-    expand_slot(&mut cfg.pid, &ctx, "pid")?;
-    expand_slot(&mut cfg.userns, &ctx, "userns")?;
-    expand_slot(&mut cfg.user, &ctx, "user")?;
-    expand_slot(&mut cfg.workdir, &ctx, "workdir")?;
-    for (i, u) in cfg.ulimits.iter_mut().enumerate() {
-        *u = expand_env(u, &ctx, &format!("ulimits[{i}]"))?;
-    }
-    for (i, e) in cfg.entry.iter_mut().enumerate() {
-        *e = expand_env(e, &ctx, &format!("entry[{i}]"))?;
-    }
-    expand_init(&mut cfg.init, &ctx)?;
-    for (i, h) in cfg.extra_hosts.iter_mut().enumerate() {
-        *h = expand_env(h, &ctx, &format!("extra_hosts[{i}]"))?;
-    }
-    for (i, o) in cfg.security_opts.iter_mut().enumerate() {
-        *o = expand_env(o, &ctx, &format!("security_opts[{i}]"))?;
-    }
-    for (i, m) in cfg.mounts.iter_mut().enumerate() {
-        *m = expand_env(m, &ctx, &format!("mounts[{i}]"))?;
-    }
-    Ok(())
 }
 
 /// The `[init]` steps, shape-checked: non-empty, exec requires a
@@ -491,6 +238,16 @@ pub struct SteelbxConfig {
     pub init: Option<crate::driver::Init>,
 }
 
+/// The result of the load pipeline's pre-pass ([`SteelbxConfig::pre_expand`]):
+/// the expanded `image`, the declared profile name, the final box name,
+/// and the parsed `env_files` (threaded to the full pass — no re-read).
+pub struct PreExpand {
+    pub image: Option<String>,
+    pub declared: Option<String>,
+    pub final_name: Option<String>,
+    pub file_env: IndexMap<String, String>,
+}
+
 impl SteelbxConfig {
     /// Available profile names (the stems of `profiles/*.conf`),
     /// sorted: the user dir and the system (shipped) dir, unioned — a
@@ -544,27 +301,29 @@ impl SteelbxConfig {
         Self::parse_from(&Self::find_profile_path(name, &Self::profile_dirs(&home))?)
     }
 
-    /// The pre-pass of the load pipeline (see `pre_expand_with_env`),
-    /// against the process env: returns (image, declared name, final
-    /// name).
-    pub fn pre_expand(
-        cfg: &mut Self,
-        name_flag: Option<&str>,
-    ) -> Result<(Option<String>, Option<String>, Option<String>)> {
+    /// The pre-pass of the load pipeline, against the process env:
+    /// returns [`PreExpand`] (expanded `image`, declared name, final
+    /// name, `file_env`).
+    pub fn pre_expand(cfg: &mut Self, name_flag: Option<&str>) -> Result<PreExpand> {
         let caller: HashMap<String, String> = std::env::vars().collect();
-        pre_expand_with_env(cfg, &caller, name_flag)
+        crate::expand::pre_expand(cfg, &caller, name_flag)
     }
 
-    /// The full pass of the load pipeline (see `expand_with_env`),
-    /// against the process env: warn, expand, validate the expanded
-    /// shape. `box_name` is always defined (the effective name: the
-    /// `-n` flag, the profile's `name` key, or a generated unique
-    /// name) and becomes `STEELBX_BOX_NAME`.
-    pub fn finish_expand(cfg: &mut Self, box_name: &str) -> Result<()> {
+    /// The full pass of the load pipeline, against the process env:
+    /// warn, expand, validate the expanded shape. `box_name` is always
+    /// defined (the effective name: the `-n` flag, the profile's `name`
+    /// key, or a generated unique name) and becomes `STEELBX_BOX_NAME`.
+    /// `file_env` is the parsed `env_files` from `pre_expand` — no
+    /// re-read.
+    pub fn finish_expand(
+        cfg: &mut Self,
+        box_name: &str,
+        file_env: &IndexMap<String, String>,
+    ) -> Result<()> {
         // Warn before expansion (mounts still have $ references).
         Self::warn_runtime_env_in_mounts(cfg);
         let caller: HashMap<String, String> = std::env::vars().collect();
-        expand_with_env(cfg, &caller, box_name)?;
+        crate::expand::expand_rest(cfg, &caller, box_name, file_env)?;
         Self::validate_config(cfg)?;
         Ok(())
     }
@@ -624,15 +383,15 @@ impl SteelbxConfig {
         // Warn before expansion (mounts still have $ references).
         Self::warn_runtime_env_in_mounts(cfg);
         let caller: HashMap<String, String> = std::env::vars().collect();
-        let (image, _declared, final_name) = pre_expand_with_env(cfg, &caller, None)?;
+        let pre = crate::expand::pre_expand(cfg, &caller, None)?;
         // The box name — always defined: the final name (the declared
         // `name`, a fresh random token appended unless
         // `name_unique = false`), else a generated unique name from
         // the image's name component.
-        let name = final_name.unwrap_or_else(|| {
-            crate::driver::unique_name(&default_box_name(image.as_deref().unwrap_or_default()))
+        let name = pre.final_name.clone().unwrap_or_else(|| {
+            crate::driver::unique_name(&default_box_name(pre.image.as_deref().unwrap_or_default()))
         });
-        expand_with_env(cfg, &caller, &name)?;
+        crate::expand::expand_rest(cfg, &caller, &name, &pre.file_env)?;
         Self::validate_config(cfg)?;
         Ok(())
     }
@@ -762,8 +521,8 @@ impl SteelbxConfig {
             return;
         }
         for (i, m) in cfg.mounts.iter().enumerate() {
-            if crate::validate::is_volume_mount_spec(m)
-                && crate::validate::volume_name_from_mount_spec(m).is_none()
+            if crate::mount::is_volume_mount_spec(m)
+                && crate::mount::volume_name_from_mount_spec(m).is_none()
             {
                 eprintln!(
                     "warning: delete_volumes is set but mounts[{i}] declares a \
@@ -1229,12 +988,15 @@ ulimits = ["host"]
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         let mut cfg: SteelbxConfig = toml::from_str(raw).unwrap();
-        let (_image, _declared, final_name) = pre_expand_with_env(&mut cfg, &env, name_flag)?;
+        let pre = crate::expand::pre_expand(&mut cfg, &env, name_flag)?;
         // The name (as in the create pipeline): the final name (the
         // flag, or the declared name — a fresh token appended unless
         // `name_unique = false`), else a generated name on `base`.
-        let name = final_name.unwrap_or_else(|| crate::driver::unique_name(base));
-        expand_with_env(&mut cfg, &env, &name)?;
+        let name = pre
+            .final_name
+            .clone()
+            .unwrap_or_else(|| crate::driver::unique_name(base));
+        crate::expand::expand_rest(&mut cfg, &env, &name, &pre.file_env)?;
         SteelbxConfig::validate_config(&mut cfg)?;
         Ok(cfg)
     }
@@ -1488,9 +1250,9 @@ image = "img-${STEELBX_BOX_NAME}"
         let mut cfg =
             SteelbxConfig::parse_from(&SteelbxConfig::find_profile_path("p", dirs).unwrap())
                 .unwrap();
-        let (_image, _declared, final_name) =
-            SteelbxConfig::pre_expand(&mut cfg, Some("from-flag")).unwrap();
-        SteelbxConfig::finish_expand(&mut cfg, final_name.as_deref().unwrap()).unwrap();
+        let pre = SteelbxConfig::pre_expand(&mut cfg, Some("from-flag")).unwrap();
+        SteelbxConfig::finish_expand(&mut cfg, pre.final_name.as_deref().unwrap(), &pre.file_env)
+            .unwrap();
         assert_eq!(cfg.name.as_deref(), Some("from-flag"));
         assert_eq!(cfg.image.as_deref(), Some("img-from-flag"));
         // No flag: the profile's own `name` key is the declared name.
@@ -1502,8 +1264,9 @@ image = "img-${STEELBX_BOX_NAME}"
         let mut cfg =
             SteelbxConfig::parse_from(&SteelbxConfig::find_profile_path("q", dirs).unwrap())
                 .unwrap();
-        let (_image, _declared, final_name) = SteelbxConfig::pre_expand(&mut cfg, None).unwrap();
-        SteelbxConfig::finish_expand(&mut cfg, final_name.as_deref().unwrap()).unwrap();
+        let pre = SteelbxConfig::pre_expand(&mut cfg, None).unwrap();
+        SteelbxConfig::finish_expand(&mut cfg, pre.final_name.as_deref().unwrap(), &pre.file_env)
+            .unwrap();
         assert_eq!(cfg.name.as_deref(), Some("from-profile"));
         assert_eq!(cfg.image.as_deref(), Some("img-from-profile"));
     }
@@ -1571,7 +1334,7 @@ image = "img-${STEELBX_BOX_NAME}"
     #[test]
     fn parse_env_file_rules_are_pinned() {
         let mut m: IndexMap<String, String> = IndexMap::new();
-        parse_env_file(
+        crate::expand::parse_env_file(
             "# a comment\n\nexport Zeta=bar\nAlpha = spaced\nEMPTY=\n  Beta=4\n",
             "f",
             &mut m,
@@ -1583,8 +1346,10 @@ image = "img-${STEELBX_BOX_NAME}"
         assert_eq!(m.get("Alpha").map(String::as_str), Some("spaced"));
         assert_eq!(m.get("EMPTY").map(String::as_str), Some(""));
         assert_eq!(m.get("Beta").map(String::as_str), Some("4"));
-        assert!(parse_env_file("no equals here\n", "f", &mut IndexMap::new()).is_err());
-        assert!(parse_env_file("a-b=1\n", "f", &mut IndexMap::new()).is_err());
+        assert!(
+            crate::expand::parse_env_file("no equals here\n", "f", &mut IndexMap::new()).is_err()
+        );
+        assert!(crate::expand::parse_env_file("a-b=1\n", "f", &mut IndexMap::new()).is_err());
     }
 
     #[test]

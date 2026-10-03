@@ -181,7 +181,7 @@ impl From<&crate::config::SteelbxConfig> for CreateSpec {
             // The named volumes the `mounts` declare, only under
             // `delete_volumes` — the `box.volumes` label's content.
             volumes: if cfg.delete_volumes {
-                crate::validate::volume_names_from_specs(&cfg.mounts)
+                crate::mount::volume_names_from_specs(&cfg.mounts)
             } else {
                 Vec::new()
             },
