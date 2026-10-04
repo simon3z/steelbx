@@ -1,7 +1,7 @@
 %bcond_without check
 
 Name:           steelbx
-Version:        0.1.1
+Version:        0.2.0
 # Release: computed by rpm-build.sh (--define release N = commits since
 # the last tag + 1); defaults to 1 when release is not defined.
 Release:        %{?release}%{!?release:1}%{?dist}
@@ -168,6 +168,9 @@ fi
 # the last tag + 1); this entry and Release: expand from the same macro,
 # so the changelog always matches the built Release.
 %changelog
+* Sun Oct 04 2026 Federico Simoncelli <federico.simoncelli@gmail.com> - 0.2.0-%{?release}%{!?release:1}
+- Updated to upstream 0.2.0
+
 * Sun Sep 27 2026 Federico Simoncelli <federico.simoncelli@gmail.com> - 0.1.1-%{?release}%{!?release:1}
 - Updated to upstream 0.1.1
 
