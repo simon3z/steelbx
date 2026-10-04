@@ -41,12 +41,12 @@ jobs:
         with:
           name: steelbx-rpm
           path: |
-            ~/rpmbuild/RPMS/x86_64/steelbx-*.rpm
-            ~/rpmbuild/SRPMS/steelbx-*.src.rpm
+            ${{ github.workspace }}/rpmbuild/RPMS/x86_64/steelbx-*.rpm
+            ${{ github.workspace }}/rpmbuild/SRPMS/steelbx-*.src.rpm
 
       - name: Attach RPM to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            ~/rpmbuild/RPMS/x86_64/steelbx-*.x86_64.rpm
+            ${{ github.workspace }}/rpmbuild/RPMS/x86_64/steelbx-*.x86_64.rpm

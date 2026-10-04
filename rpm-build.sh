@@ -11,7 +11,7 @@
 #     and the spec's Version: must match it)
 #   * release = commits since the last tag + 1
 #   * the spec's Version: and License: must be up to date; verified here
-#   * topdir = ~/rpmbuild
+#   * topdir = ./rpmbuild (local to this checkout)
 #
 # Requires: cargo, python3, rpmbuild, rpmlint, xz, git, and
 #          rust-packaging (cargo-rpm-macros: provides the
@@ -32,7 +32,7 @@ if [ -z "$VERSION" ]; then
     exit 1
 fi
 
-RPM_TOP=~/rpmbuild
+RPM_TOP="$(pwd)/rpmbuild"
 mkdir -p "${RPM_TOP}"/{SOURCES,SPECS,BUILD,BUILDROOT,SRPMS,RPMS,TMP}
 
 # Release number: commits since the last tag + 1 (1 if no tags).
@@ -147,7 +147,7 @@ do_build() {
     local release
     release="$(release_number)"
     echo "==> Release number: $release (commits since last tag + 1)"
-    ( cd "${RPM_TOP}/SPECS" && rpmbuild --define "release $release" -ba "$SPEC" )
+    ( cd "${RPM_TOP}/SPECS" && rpmbuild --define "_topdir ${RPM_TOP}" --define "release $release" -ba "$SPEC" )
 }
 
 # Lint the spec (from SPECS) and the built binary RPMs.
@@ -159,7 +159,7 @@ do_lint() {
 echo "==> Building RPM for $NAME v$VERSION"
 do_build
 echo "==> Done"
-ls -lh "${RPM_TOP}/RPMS/x86_64/"${NAME}*.rpm
+ls -lh "${RPM_TOP}"/RPMS/*/${NAME}*.rpm
 
 case "${1:-}" in
     lint) do_lint ;;

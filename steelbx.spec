@@ -24,11 +24,15 @@ BuildRequires:  rust
 # and the cargo_vendor fileattr hook: the shipped cargo-vendor.txt
 # becomes Provides: bundled(crate(<name>)) = <version> per vendored crate.
 BuildRequires:  rust-packaging
+# The lib target (src/lib.rs) exists only so tests/integration.rs can drive
+# the internals; it is not shipped. cargo-rpm-macros would otherwise copy
+# the crate into %%crate_instdir and create a -devel subpackage, which an
+# application package does not need.
+%define cargo_install_lib 0
 # For the selinux subpackage (module compiled during %build)
 BuildRequires:  m4
 BuildRequires:  checkpolicy
 BuildRequires:  selinux-policy-devel
-
 # Bundled(crate(<name>) = <version> provides: the cargo_vendor fileattr
 # hook (cargo-rpm-macros) emits them from the shipped cargo-vendor.txt
 # (see "Bundled Dependencies" in the Fedora Rust Packaging Guidelines).
@@ -59,15 +63,16 @@ grants the host Wayland resources steelbx profiles bind-mount into
 the box (/run/user/<UID> wayland sockets, host config dirs), and a
 host-side grant lets system_dbusd_t toggle SELinux enforcement.
 %prep
-%autosetup -n %{name}-%{version}
-# Extract vendored deps + .cargo/config into the source tree
-tar xJf %{S:1} \
-    -C %{_builddir}/%{name}-%{version}/
+# -a 1: extract the vendor tarball (Source1) on top of Source0
+%autosetup -a 1
+# %%cargo_prep: writes .cargo/config.toml itself (offline +
+# vendored-sources dir), removes Cargo.lock, defines [profile.rpm]
+%cargo_prep -v vendor
 
 %build
-# .cargo/config (from cargo vendor) redirects all deps to ./vendor
-# --offline: no network access   --frozen: use Cargo.lock as-is
-cargo build --release --offline --frozen
+# %%cargo_build: cargo build --profile rpm -Z avoid-dev-deps + smp flags;
+# offline mode comes from the .cargo/config.toml that %%cargo_prep wrote.
+%cargo_build
 # Write cargo-vendor.txt (one "name vX.Y.Z" line per crate); shipped via
 # %%license, the cargo_vendor fileattr hook turns it into
 # bundled(crate(<name>) = <version> provides.
@@ -91,7 +96,9 @@ for crate in vendor/*/; do
 done
 
 %install
-install -Dm 0755 target/release/steelbx %{buildroot}%{_bindir}/steelbx
+# %%cargo_install: cargo install --profile rpm --no-track --path .
+export PATH="%{buildroot}%{_bindir}:$PATH"
+%cargo_install
 install -Dm 0644 steelbx_selinux.pp %{buildroot}%{_datadir}/selinux/packages/steelbx_selinux.pp
 gzip -9 man/steelbx.1
 install -Dm 0644 man/steelbx.1.gz %{buildroot}%{_mandir}/man1/steelbx.1.gz
@@ -114,7 +121,10 @@ done
 
 %check
 %if %{with check}
-cargo test --release --offline --frozen --lib --bins
+# %%cargo_test (as shipped) runs ALL test targets; the integration suite
+# (tests/integration.rs) needs a working podman, which the build
+# container lacks. Run the same lib + bins set that ci.sh runs.
+%{__cargo} test %{__cargo_common_opts} --profile rpm --lib --bins --no-fail-fast
 %endif
 
 # No rpm macro exists for loading SELinux modules; these follow the
